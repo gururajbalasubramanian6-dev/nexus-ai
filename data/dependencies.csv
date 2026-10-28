@@ -1,0 +1,7 @@
+upstream_node,downstream_node,material,capacity
+Processor X,Supplier A,Battery cells,100
+Processor X,Supplier B,Battery cells,80
+Processor Y,Supplier C,Battery cells,120
+Raw Material P,Processor X,Raw material,250
+Raw Material Q,Processor Y,Raw material,150
+
