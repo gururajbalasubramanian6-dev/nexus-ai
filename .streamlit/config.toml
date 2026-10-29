@@ -1,0 +1,39 @@
+# Nexus-AI Streamlit Configuration
+# This file controls Streamlit's native theme and server settings.
+# Place this file at: nexus-ai/.streamlit/config.toml
+
+[theme]
+# Use "dark" as the base — this tells Streamlit to start from its built-in
+# dark palette, so the top menu bar, toolbar icons, pop-ups, modals,
+# dataframe toolbars, and all native widgets are dark by default.
+# The custom CSS in app.py then refines the accent colours further.
+base                  = "dark"
+
+# Primary interactive accent (buttons, sliders, active tab underline, etc.)
+primaryColor          = "#2DD4BF"
+
+# Main content area background — deep navy
+backgroundColor       = "#0B1220"
+
+# Sidebar and widget background — slightly lighter navy
+secondaryBackgroundColor = "#111827"
+
+# Body text — near-white for maximum readability on dark backgrounds
+textColor             = "#F8FAFC"
+
+# Font family
+font                  = "sans-serif"
+
+[server]
+# Suppress the "Welcome to Streamlit!" first-run pop-up
+headless              = true
+
+# Prevent Streamlit from automatically opening a browser tab
+# (user launches the browser themselves)
+# Set to false so the URL is printed but the browser is NOT opened automatically
+# on servers / CI environments. Comment this out if you want auto-open locally.
+# browser.gatherUsageStats = false  # uncomment to opt out of usage telemetry
+
+[browser]
+gatherUsageStats      = false
+
