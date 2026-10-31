@@ -41,6 +41,17 @@ from agents.mapping_agent import (
     DEFAULT_DEPENDENCIES_CSV,
 )
 
+# SAP HANA Cloud Database Adapter
+from agents.sap_adapter import (
+    SAPConfigurationError,
+    SAPConnectionConfig,
+    SAPConnectionError,
+    SAPDataError,
+    is_sap_configured,
+    load_sap_supply_chain,
+    test_sap_connection,
+)
+
 # Member 2 Imports
 from agents.risk_detection_agent import (
     detect_shared_risks,
@@ -345,20 +356,60 @@ def run_streamlit_app() -> None:
     st.sidebar.markdown("---")
     st.sidebar.subheader("📂 1. Dataset Selection")
 
+    sap_is_ready = is_sap_configured()
+    default_dataset_idx = 0 if sap_is_ready else 1
+
     data_choice = st.sidebar.radio(
         "Choose Supply Chain Data Source:",
         [
+            "SAP HANA Cloud (Live Database: HACKFEST0316)",
             "Standard Sample (data/dependencies.csv)",
             "Canonical Multi-Tier Network (with Factories & Routes)",
             "Upload Custom Dependencies CSV",
         ],
-        index=0,
+        index=default_dataset_idx,
     )
 
     graph: nx.DiGraph
     data_source_name: str = ""
 
-    if data_choice == "Standard Sample (data/dependencies.csv)":
+    if data_choice == "SAP HANA Cloud (Live Database: HACKFEST0316)":
+        data_source_name = "SAP HANA Cloud (Schema: HACKFEST0316)"
+        try:
+            with st.spinner("Connecting to SAP HANA Cloud & querying NEXUS tables..."):
+                graph, dep_df, nodes_df = load_sap_supply_chain()
+            st.sidebar.success(
+                f"SAP HANA Connected: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
+            )
+            with st.sidebar.expander("SAP Database Master", expanded=False):
+                st.caption("Schema: HACKFEST0316")
+                st.write(f"**Nodes ({len(nodes_df)}):**")
+                st.dataframe(nodes_df, hide_index=True)
+                st.write(f"**Dependencies ({len(dep_df)}):**")
+                st.dataframe(dep_df, hide_index=True)
+        except SAPConfigurationError as cfg_err:
+            st.sidebar.warning(f"SAP Config: {cfg_err}")
+            st.warning(
+                "**SAP HANA Cloud credentials not configured yet.**\n\n"
+                "To connect to your live database:\n"
+                "1. Copy `.env.example` to `.env`.\n"
+                "2. Provide your `HANA_ADDRESS`, `HANA_PORT`, `HANA_USER`, `HANA_PASSWORD`.\n\n"
+                "*Falling back to Standard Sample dataset.*"
+            )
+            data_source_name = "Sample Dependencies CSV (Fallback)"
+            df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
+            graph = build_supply_chain_graph(df)
+        except Exception as exc:
+            st.sidebar.error(f"SAP Connection Error: {exc}")
+            st.error(
+                f"**Could not connect to SAP HANA Cloud:** {exc}\n\n"
+                "*Falling back to Standard Sample dataset.*"
+            )
+            data_source_name = "Sample Dependencies CSV (Fallback)"
+            df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
+            graph = build_supply_chain_graph(df)
+
+    elif data_choice == "Standard Sample (data/dependencies.csv)":
         data_source_name = "Sample Dependencies CSV "
         try:
             df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
@@ -892,15 +943,27 @@ def run_cli_fallback(args: argparse.Namespace) -> None:
     print("=" * 70)
 
     # 1. Load Data
-    csv_path = args.csv if args.csv else DEFAULT_DEPENDENCIES_CSV
-    print(f"\n[Step 1/5] Ingesting & validating data from: {csv_path}")
-    try:
-        df = load_and_validate_dependencies(csv_path)
-        graph = build_supply_chain_graph(df)
-        print(f"           SUCCESS: Loaded {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges.")
-    except Exception as exc:
-        print(f"[ERROR] Failed to load dataset: {exc}")
-        sys.exit(1)
+    if getattr(args, "sap", False):
+        print("\n[Step 1/5] Ingesting & validating data from SAP HANA Cloud (HACKFEST0316)...")
+        try:
+            graph, dep_df, nodes_df = load_sap_supply_chain()
+            print(f"           SUCCESS: Loaded {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges from SAP HANA.")
+        except Exception as exc:
+            print(f"[ERROR] Failed to load from SAP HANA: {exc}")
+            print("        Falling back to local CSV...")
+            csv_path = args.csv if args.csv else DEFAULT_DEPENDENCIES_CSV
+            df = load_and_validate_dependencies(csv_path)
+            graph = build_supply_chain_graph(df)
+    else:
+        csv_path = args.csv if args.csv else DEFAULT_DEPENDENCIES_CSV
+        print(f"\n[Step 1/5] Ingesting & validating data from: {csv_path}")
+        try:
+            df = load_and_validate_dependencies(csv_path)
+            graph = build_supply_chain_graph(df)
+            print(f"           SUCCESS: Loaded {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges.")
+        except Exception as exc:
+            print(f"[ERROR] Failed to load dataset: {exc}")
+            sys.exit(1)
 
     # 2. Member 2: Shared Risk
     print("\n[Step 2/5] Running Member 2 Shared Risk Detection...")
@@ -952,6 +1015,7 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--loss-per-unit", type=float, default=150.0, help="Loss per unit ($)")
     parser.add_argument("--budget", type=float, default=50000.0, help="Available recovery budget ($)")
     parser.add_argument("--max-lead-time", type=float, default=14.0, help="Max acceptable lead time (days)")
+    parser.add_argument("--sap", action="store_true", help="Load live data from SAP HANA Cloud (schema HACKFEST0316)")
     parser.add_argument("--cli", action="store_true", help="Force command-line interface execution")
     return parser.parse_args()
 

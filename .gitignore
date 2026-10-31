@@ -16,6 +16,8 @@ supply_chain_graph.html
 # Environment variables and secrets
 .env
 .env.*
+!.env.example
+.streamlit/secrets.toml
 
 # Test cache
 .pytest_cache/

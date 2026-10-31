@@ -293,3 +293,66 @@ def test_11_resilience_network_figure_generation():
     assert len(fig.data) > 0  # Contains scatter traces for routes and nodes
     assert len(fig.layout.annotations) > 0  # Contains directed edge arrows
 
+
+# =========================================================================
+# Test 12: SAP HANA Cloud live data source integration
+# =========================================================================
+def test_12_sap_hana_integration_in_dashboard():
+    """Verify that SAP HANA supply chain graph integrates with dashboard components."""
+    from unittest.mock import MagicMock, patch
+    from agents.sap_adapter import SAPConnectionConfig, load_sap_supply_chain
+
+    sample_nodes = [
+        ("Raw Material P", "Raw Material"),
+        ("Raw Material Q", "Raw Material"),
+        ("Processor X", "Processor"),
+        ("Processor Y", "Processor"),
+        ("Supplier A", "Supplier"),
+        ("Supplier B", "Supplier"),
+        ("Supplier C", "Supplier"),
+    ]
+    sample_dependencies = [
+        ("Raw Material P", "Processor X", "Raw material", 250.0),
+        ("Raw Material Q", "Processor Y", "Raw material", 150.0),
+        ("Processor X", "Supplier A", "Battery cells", 100.0),
+        ("Processor X", "Supplier B", "Battery cells", 80.0),
+        ("Processor Y", "Supplier C", "Battery cells", 120.0),
+    ]
+
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+
+    def cursor_execute(query):
+        if "NEXUS_DEPENDENCIES" in query:
+            mock_cursor.description = [
+                ("UPSTREAM_NODE",), ("DOWNSTREAM_NODE",), ("MATERIAL",), ("CAPACITY",)
+            ]
+            mock_cursor.fetchall.return_value = sample_dependencies
+        elif "NEXUS_NODES" in query:
+            mock_cursor.description = [("NODE_NAME",), ("NODE_TYPE",)]
+            mock_cursor.fetchall.return_value = sample_nodes
+
+    mock_cursor.execute.side_effect = cursor_execute
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    mock_conn.__enter__.return_value = mock_conn
+
+    config = SAPConnectionConfig(
+        address="hana-cloud-host.hanacloud.ondemand.com",
+        port=443,
+        user="DBADMIN",
+        password="TestPassword123!",
+    )
+
+    with patch("agents.sap_adapter.get_sap_connection", return_value=mock_conn):
+        graph, dep_df, nodes_df = load_sap_supply_chain(config)
+
+    assert graph.number_of_nodes() == 7
+    assert graph.number_of_edges() == 5
+    assert len(dep_df) == 5
+    assert len(nodes_df) == 7
+
+    # Run complete dashboard pipeline on SAP HANA graph
+    sim = simulate_disruption(graph, failed_node="Processor X")
+    fig = create_resilient_network_figure(graph, simulation_result=sim, selected_entity="Processor X")
+    assert isinstance(fig, go.Figure)
+
