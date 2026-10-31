@@ -611,6 +611,92 @@ def optimize_recovery_plan(
     if scen.max_lead_time_days is None:
         assumptions.append("No maximum lead time constraint specified; lead times evaluated without ceiling.")
 
+    # Check if scenario is unquantified (capacity data is unrecorded/missing)
+    is_unquantified = bool(
+        scen.additional_metadata.get("is_unquantified", False)
+        or (not scen.additional_metadata.get("has_capacity_data", True) and scen.affected_quantity == 0.0)
+    )
+
+    if is_unquantified:
+        # All candidate options must be classified as rejected/unverified
+        unquantified_rejected = []
+        for idx, opt_input in enumerate(recovery_options):
+            opt_id = (
+                opt_input.get("option_id", f"OPTION_{idx}")
+                if isinstance(opt_input, dict)
+                else getattr(opt_input, "option_id", f"OPTION_{idx}")
+            )
+            desc = (
+                opt_input.get("description", "")
+                if isinstance(opt_input, dict)
+                else getattr(opt_input, "description", "")
+            )
+            rec_cost = (
+                opt_input.get("recovery_cost", 0.0)
+                if isinstance(opt_input, dict)
+                else getattr(opt_input, "recovery_cost", 0.0)
+            )
+            cap = (
+                opt_input.get("available_capacity")
+                if isinstance(opt_input, dict)
+                else getattr(opt_input, "available_capacity", None)
+            )
+            lt = (
+                opt_input.get("lead_time_days")
+                if isinstance(opt_input, dict)
+                else getattr(opt_input, "lead_time_days", None)
+            )
+            unquantified_rejected.append({
+                "option_id": opt_id,
+                "description": desc,
+                "is_feasible": False,
+                "rejection_reasons": ["Feasibility unverified: Disrupted production quantity is unquantified."],
+                "recovery_cost": rec_cost,
+                "available_capacity": cap,
+                "lead_time_days": lt,
+                "estimated_total_cost": None,
+                "estimated_savings": None,
+                "missing_fields": ["unquantified_disrupted_quantity"],
+            })
+
+        missing_info.append(
+            f"Disrupted production throughput for '{scen.disrupted_node}' is unquantified. "
+            "Automated recovery optimization is suspended to prevent capital misallocation."
+        )
+
+        explanation = (
+            f"Financial impact for '{scen.disrupted_node}' is UNQUANTIFIED. "
+            "Because operational throughput capacity is unrecorded in the active dataset, "
+            "baseline loss and recovery feasibility cannot be verified. "
+            "Automated recovery plan selection is suspended pending manual capacity audit."
+        )
+
+        return {
+            "scenario_id": scen.scenario_id,
+            "disrupted_node": scen.disrupted_node,
+            "affected_quantity": 0.0,
+            "loss_per_unit": scen.loss_per_unit,
+            "baseline_disruption_loss": None,
+            "financial_status": "UNQUANTIFIED",
+            "is_unquantified": True,
+            "available_budget": scen.available_budget,
+            "max_lead_time_days": scen.max_lead_time_days,
+            "recommended_option_ids": [],
+            "recovery_cost": 0.0,
+            "residual_disruption_loss": None,
+            "estimated_total_cost": None,
+            "estimated_savings": None,
+            "feasible_options": [],
+            "rejected_options": unquantified_rejected,
+            "assumptions": assumptions + [
+                "Disrupted throughput volume is unrecorded in dataset; baseline disruption loss is UNQUANTIFIED.",
+                "Candidate recovery options are illustrative reference estimates only.",
+            ],
+            "missing_information": missing_info,
+            "recommendation_explanation": explanation,
+            "requires_human_approval": True,
+        }
+
     # 2. Ingest and evaluate candidate options
     if not isinstance(recovery_options, list):
         raise FinancialValidationError("recovery_options must be a list of options or option dicts.")

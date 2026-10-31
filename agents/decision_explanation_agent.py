@@ -59,14 +59,14 @@ class DecisionExplanationAgent:
             and a formatted Markdown synthesis.
         """
         # 1. What failed
-        what_failed = self._explain_what_failed(disruption_result)
+        what_failed = self._explain_what_failed(disruption_result, graph=graph)
 
         # 2. Which entities were affected
         affected_entities = self._explain_affected_entities(disruption_result)
 
         # 3. Why the disruption matters
         why_it_matters = self._explain_why_it_matters(
-            disruption_result, risk_findings
+            disruption_result, risk_findings, graph=graph
         )
 
         # 4. What the financial engine calculated
@@ -87,7 +87,7 @@ class DecisionExplanationAgent:
 
         # 8. Remaining residual risks
         residual_risks = self._explain_residual_risks(
-            disruption_result, financial_result
+            disruption_result, financial_result, graph=graph
         )
 
         # 9. Human approval requirement
@@ -126,7 +126,11 @@ class DecisionExplanationAgent:
     # Section Explanations
     # =========================================================================
 
-    def _explain_what_failed(self, disruption_result: Dict[str, Any]) -> Dict[str, Any]:
+    def _explain_what_failed(
+        self,
+        disruption_result: Dict[str, Any],
+        graph: Optional[nx.DiGraph] = None,
+    ) -> Dict[str, Any]:
         failed_entity = disruption_result.get("failed_entity", "Unknown Entity")
         disruption_type = disruption_result.get("disruption_type", "General failure")
         cap_impact = disruption_result.get("estimated_capacity_impact", {})
@@ -135,7 +139,16 @@ class DecisionExplanationAgent:
         if direct_loss is not None and direct_loss > 0:
             loss_str = f"{direct_loss:,.1f} throughput units"
         else:
-            loss_str = "an unrecorded volume (capacity data unrecorded)"
+            inbound_notes = []
+            if graph is not None and graph.has_node(failed_entity):
+                for u, _, edata in graph.in_edges(failed_entity, data=True):
+                    c = edata.get("capacity")
+                    if c is not None:
+                        inbound_notes.append(f"{c:,.1f} units from '{u}'")
+            if inbound_notes:
+                loss_str = f"an unrecorded volume (facility production capacity unrecorded; inbound delivery feed of {', '.join(inbound_notes)} noted for reference)"
+            else:
+                loss_str = "an unrecorded volume (capacity data unrecorded)"
 
         narrative = (
             f"A disruption event occurred at '{failed_entity}', classified as a '{disruption_type}'. "
@@ -210,9 +223,21 @@ class DecisionExplanationAgent:
         self,
         disruption_result: Dict[str, Any],
         risk_findings: Optional[List[Dict[str, Any]]] = None,
+        graph: Optional[nx.DiGraph] = None,
     ) -> Dict[str, Any]:
         failed_entity = disruption_result.get("failed_entity", "")
         impact_level = disruption_result.get("impact_level", "Unknown")
+        affected_entities = disruption_result.get("affected_entities", [])
+        disrupted_paths = disruption_result.get("disrupted_paths") or []
+
+        # Determine network topology attributes
+        out_deg = 0
+        inbound_nodes = []
+        if graph is not None and graph.has_node(failed_entity):
+            out_deg = graph.out_degree(failed_entity)
+            inbound_nodes = [u for u, _ in graph.in_edges(failed_entity)]
+        else:
+            out_deg = len(affected_entities)
 
         # Cross-reference with Member 2's shared risk analysis
         shared_risk_info = None
@@ -247,10 +272,24 @@ class DecisionExplanationAgent:
             exp = shared_risk_info.get("explanation")
             if exp:
                 reasons.append(f"Audit breakdown: {exp}")
+        elif out_deg == 0 or len(affected_entities) == 0:
+            if inbound_nodes:
+                feed_source = ", ".join(inbound_nodes)
+                reasons.append(
+                    f"Network Topology Audit: '{failed_entity}' is a terminal leaf sink node (out-degree = 0) "
+                    f"with zero downstream dependencies in the active network model. While it receives an inbound "
+                    f"feed from {feed_source}, its operational outage is localized to this facility and does not "
+                    "cascade to any subsequent manufacturing plants, assembly facilities, or customer distribution points."
+                )
+            else:
+                reasons.append(
+                    f"Network Topology Audit: '{failed_entity}' has zero downstream dependencies in the active "
+                    "network model. Outage impact is contained at this facility and does not cascade downstream."
+                )
         else:
             reasons.append(
-                f"Upstream failure at '{failed_entity}' triggers cascading downstream bottlenecks along all connected "
-                f"directed edges."
+                f"Disruption at '{failed_entity}' affects {len(affected_entities)} downstream entity/entities "
+                f"across {len(disrupted_paths)} broken supply corridor(s)."
             )
 
         return {
@@ -265,39 +304,68 @@ class DecisionExplanationAgent:
         disruption_result: Dict[str, Any],
         financial_result: Dict[str, Any],
     ) -> Dict[str, Any]:
-        baseline_loss = financial_result.get("baseline_disruption_loss", 0.0)
+        baseline_loss = financial_result.get("baseline_disruption_loss")
         affected_qty = financial_result.get("affected_quantity", 0.0)
         loss_per_unit = financial_result.get("loss_per_unit", 0.0)
         rec_cost = financial_result.get("recovery_cost", 0.0)
-        residual_loss = financial_result.get("residual_disruption_loss", 0.0)
-        total_cost = financial_result.get("estimated_total_cost", 0.0)
-        savings = financial_result.get("estimated_savings", 0.0)
+        residual_loss = financial_result.get("residual_disruption_loss")
+        total_cost = financial_result.get("estimated_total_cost")
+        savings = financial_result.get("estimated_savings")
+        is_unquantified = bool(financial_result.get("is_unquantified", False) or baseline_loss is None)
+
+        if is_unquantified:
+            formula = "Gross Disruption Loss = UNQUANTIFIED (Throughput capacity unrecorded in network model)"
+            cost_formula = "Recovery Plan Cost = UNQUANTIFIED (Cannot verify feasibility without confirmed volume)"
+            failed_name = disruption_result.get("failed_entity", "the disrupted entity")
+            narrative = (
+                f"Baseline financial loss for '{failed_name}' cannot be quantified because operational throughput "
+                "capacity is unrecorded in the active dataset. To uphold financial integrity, the engine does NOT "
+                "invent proxy volumes or claim unverified savings. Automated capital commitment is suspended "
+                "pending an operational capacity audit."
+            )
+            return {
+                "baseline_loss": None,
+                "affected_quantity": 0.0,
+                "loss_per_unit": loss_per_unit,
+                "recovery_cost": 0.0,
+                "residual_loss": None,
+                "estimated_total_cost": None,
+                "estimated_savings": None,
+                "loss_formula": formula,
+                "cost_formula": cost_formula,
+                "narrative": narrative,
+            }
+
+        b_loss_val = float(baseline_loss) if baseline_loss is not None else 0.0
+        r_loss_val = float(residual_loss) if residual_loss is not None else 0.0
+        tot_val = float(total_cost) if total_cost is not None else 0.0
+        sav_val = float(savings) if savings is not None else 0.0
 
         formula = (
             f"Gross Disruption Loss = Affected Quantity ({affected_qty:,.1f}) "
-            f"× Loss Per Unit (${loss_per_unit:,.2f}) = ${baseline_loss:,.2f}"
+            f"× Loss Per Unit (${loss_per_unit:,.2f}) = ${b_loss_val:,.2f}"
         )
 
         cost_formula = (
             f"Recovery Plan Total Cost = Recovery Expenditure (${rec_cost:,.2f}) "
-            f"+ Residual Loss (${residual_loss:,.2f}) = ${total_cost:,.2f}"
+            f"+ Residual Loss (${r_loss_val:,.2f}) = ${tot_val:,.2f}"
         )
 
         narrative = (
             f"If no recovery action is taken, the business incurs an estimated baseline disruption loss of "
-            f"${baseline_loss:,.2f}. The financial optimization engine evaluated candidate recovery interventions, "
-            f"calculating an implementation expenditure of ${rec_cost:,.2f} with ${residual_loss:,.2f} in residual "
-            f"unmitigated losses, achieving estimated net savings of ${savings:,.2f} relative to taking no action."
+            f"${b_loss_val:,.2f}. The financial optimization engine evaluated candidate recovery interventions, "
+            f"calculating an implementation expenditure of ${rec_cost:,.2f} with ${r_loss_val:,.2f} in residual "
+            f"unmitigated losses, achieving estimated net savings of ${sav_val:,.2f} relative to taking no action."
         )
 
         return {
-            "baseline_loss": baseline_loss,
+            "baseline_loss": b_loss_val,
             "affected_quantity": affected_qty,
             "loss_per_unit": loss_per_unit,
             "recovery_cost": rec_cost,
-            "residual_loss": residual_loss,
-            "estimated_total_cost": total_cost,
-            "estimated_savings": savings,
+            "residual_loss": r_loss_val,
+            "estimated_total_cost": tot_val,
+            "estimated_savings": sav_val,
             "loss_formula": formula,
             "cost_formula": cost_formula,
             "narrative": narrative,
@@ -311,14 +379,22 @@ class DecisionExplanationAgent:
         savings = financial_result.get("estimated_savings", 0.0)
 
         if not rec_ids:
-            return {
-                "selected_ids": [],
-                "is_no_action_baseline": True,
-                "narrative": (
+            if financial_result.get("is_unquantified"):
+                sel_narrative = (
+                    "No automated recovery plan was authorized. Because the disrupted throughput volume is "
+                    "unquantified, committing capital to synthetic recovery options presents financial risk. "
+                    "Executive decision-makers must conduct an operational capacity audit before allocating funds."
+                )
+            else:
+                sel_narrative = (
                     "No candidate recovery option satisfied all operational constraints (budget, capacity, lead time). "
                     "The engine recommends the No-Action Baseline to avoid economically inefficient expenditures, "
                     "requiring manual management escalation."
-                ),
+                )
+            return {
+                "selected_ids": [],
+                "is_no_action_baseline": True,
+                "narrative": sel_narrative,
             }
 
         selected_details = [
@@ -437,18 +513,30 @@ class DecisionExplanationAgent:
         self,
         disruption_result: Dict[str, Any],
         financial_result: Dict[str, Any],
+        graph: Optional[nx.DiGraph] = None,
     ) -> Dict[str, Any]:
         residual_loss = financial_result.get("residual_disruption_loss", 0.0)
         budget = financial_result.get("available_budget")
         rec_cost = financial_result.get("recovery_cost", 0.0)
         rec_ids = financial_result.get("recommended_option_ids", [])
         potential = disruption_result.get("potential_shortage_entities", [])
+        failed_entity = disruption_result.get("failed_entity", "the disrupted entity")
+        affected = disruption_result.get("affected_entities", [])
+        paths = disruption_result.get("disrupted_paths") or []
+
+        out_deg = 0
+        if graph is not None and graph.has_node(failed_entity):
+            out_deg = graph.out_degree(failed_entity)
+        else:
+            out_deg = len(affected)
 
         risks: List[str] = []
-        if residual_loss > 0:
+        if residual_loss is not None and residual_loss > 0:
             risks.append(
                 f"Financial Exposure: A residual loss of ${residual_loss:,.2f} remains unmitigated due to capacity caps."
             )
+        elif residual_loss is None or financial_result.get("is_unquantified"):
+            risks.append("Financial Exposure: Residual disruption loss is UNQUANTIFIED due to unrecorded throughput volume.")
         else:
             risks.append("Financial Exposure: The selected recovery fully offsets the volume deficit.")
 
@@ -466,7 +554,23 @@ class DecisionExplanationAgent:
             )
 
         if not rec_ids:
-            risks.append("Unmitigated Operational Outage: Inaction maintains 100% disruption risk across all paths.")
+            if out_deg == 0 or len(affected) == 0:
+                risks.append(
+                    f"Operational Containment: Outage is contained at '{failed_entity}'. "
+                    "Because this facility feeds no downstream entities in the active graph model, "
+                    "no downstream manufacturing lines or customer deliveries are severed."
+                )
+            else:
+                risks.append(
+                    f"Unmitigated Operational Outage: Inaction leaves {len(paths)} severed supply corridor(s) "
+                    f"and {len(affected)} impacted downstream entity/entities without recovery."
+                )
+
+        if financial_result.get("is_unquantified"):
+            risks.append(
+                "Data Gap Risk: Disrupted production throughput is unquantified; "
+                "actual facility-level inventory and material backlog should be confirmed via physical site audit."
+            )
 
         return {
             "residual_financial_loss": residual_loss,
@@ -488,9 +592,11 @@ class DecisionExplanationAgent:
 
         triggers: List[str] = []
 
-        if not rec_ids:
+        if financial_result.get("is_unquantified"):
+            triggers.append("Essential business data missing: Disrupted production throughput is unquantified")
+        if not rec_ids and not financial_result.get("is_unquantified"):
             triggers.append("No viable recovery options available (No-Action Baseline invoked)")
-        if savings < 0:
+        if savings is not None and savings < 0:
             triggers.append(f"Negative net economic return (plan costs ${abs(savings):,.2f} more than inaction)")
         if budget and budget > 0 and (rec_cost / budget) >= 0.85:
             triggers.append(f"High emergency budget utilization ({(rec_cost / budget)*100:.1f}% consumed)")

@@ -331,3 +331,91 @@ def test_disruption_agent_class_wrapper(synthetic_graph):
     assert len(df) == synthetic_graph.number_of_nodes()
     assert "Entity" in df.columns
     assert "Impact Level" in df.columns
+# ---------------------------------------------------------------------------
+# Test: Operational Inbound & Confirmed Shortage Propagation
+# ---------------------------------------------------------------------------
+from agents.mapping_agent import (
+    load_and_validate_dependencies,
+    build_supply_chain_graph,
+    DEFAULT_DEPENDENCIES_CSV,
+)
+
+
+def test_processor_x_failure_operational_inbound_and_shortage(synthetic_graph):
+    """
+    Verifies that when Processor X fails:
+    1. Direct children (Supplier A, Supplier B) have Operational Inbound = 0, Severed Inbound = 1,
+       and Status = Confirmed Shortage.
+    2. Factory 1 (downstream of Supplier A) has a physically existing link (Supplier A -> Factory 1),
+       but because Supplier A is starved of upstream raw material, Factory 1 has:
+       Operational Inbound = 0, Severed Inbound = 1, Status = Confirmed Shortage.
+    3. Factory 2 (supplied by severed Supplier B and active Supplier C) has:
+       Operational Inbound = 1, Severed Inbound = 1, Status = Potentially Affected.
+    """
+    res = simulate_disruption(synthetic_graph, failed_node="Processor X")
+    details = {d["entity"]: d for d in res["entity_impact_details"]}
+
+    # Supplier A and B: direct link from failed node is severed
+    for supp in ["Supplier A", "Supplier B"]:
+        assert details[supp]["operational_inbound_links"] == 0
+        assert details[supp]["severed_inbound_links"] == 1
+        assert details[supp]["status"] == "confirmed_shortage"
+
+    # Factory 1: link from Supplier A exists physically, but is unusable due to upstream starvation
+    assert details["Factory 1"]["operational_inbound_links"] == 0
+    assert details["Factory 1"]["severed_inbound_links"] == 1
+    assert details["Factory 1"]["status"] == "confirmed_shortage"
+
+    # Factory 2: has 1 unusable link (Supplier B) and 1 usable operational link (Supplier C)
+    assert details["Factory 2"]["operational_inbound_links"] == 1
+    assert details["Factory 2"]["severed_inbound_links"] == 1
+    assert details["Factory 2"]["status"] == "potentially_affected"
+
+
+def test_raw_material_p_failure_operational_inbound_and_shortage():
+    """
+    Verifies that when Raw Material P fails on the standard/SAP HANA supply chain graph:
+    1. Processor X shows Operational Inbound = 0, Severed Inbound = 1, Status = Confirmed Shortage.
+    2. Downstream nodes Supplier A and Supplier B have physically existing links from Processor X,
+       but because Processor X is starved of raw material, they show:
+       Operational Inbound = 0, Severed Inbound = 1, Status = Confirmed Shortage.
+    """
+    df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
+    graph = build_supply_chain_graph(df)
+
+    res = simulate_disruption(graph, failed_node="Raw Material P")
+    details = {d["entity"]: d for d in res["entity_impact_details"]}
+
+    assert details["Processor X"]["operational_inbound_links"] == 0
+    assert details["Processor X"]["severed_inbound_links"] == 1
+    assert details["Processor X"]["status"] == "confirmed_shortage"
+
+    # Supplier A and Supplier B have physically existing edge from Processor X, but unusable
+    for supp in ["Supplier A", "Supplier B"]:
+        assert details[supp]["operational_inbound_links"] == 0
+        assert details[supp]["severed_inbound_links"] == 1
+        assert details[supp]["status"] == "confirmed_shortage"
+
+
+def test_raw_material_q_failure_operational_inbound_and_shortage():
+    """
+    Verifies that when Raw Material Q fails on the standard/SAP HANA supply chain graph:
+    1. Processor Y shows Operational Inbound = 0, Severed Inbound = 1, Status = Confirmed Shortage.
+    2. Downstream node Supplier C has a physically existing link from Processor Y,
+       but because Processor Y is starved of raw material, Supplier C shows:
+       Operational Inbound = 0, Severed Inbound = 1, Status = Confirmed Shortage.
+    """
+    df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
+    graph = build_supply_chain_graph(df)
+
+    res = simulate_disruption(graph, failed_node="Raw Material Q")
+    details = {d["entity"]: d for d in res["entity_impact_details"]}
+
+    assert details["Processor Y"]["operational_inbound_links"] == 0
+    assert details["Processor Y"]["severed_inbound_links"] == 1
+    assert details["Processor Y"]["status"] == "confirmed_shortage"
+
+    # Supplier C has physically existing edge from Processor Y, but unusable
+    assert details["Supplier C"]["operational_inbound_links"] == 0
+    assert details["Supplier C"]["severed_inbound_links"] == 1
+    assert details["Supplier C"]["status"] == "confirmed_shortage"

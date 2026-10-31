@@ -46,6 +46,79 @@ STATUS_COLORS: Dict[str, str] = {
 }
 
 
+def safe_format_currency(
+    val: Any,
+    default: str = "Not available",
+    decimals: int = 2,
+    prefix: str = "$",
+) -> str:
+    """
+    Format a currency value safely. Returns `default` if `val` is None or non-numeric.
+    Guards against TypeError: unsupported format string passed to NoneType.__format__.
+    """
+    if val is None:
+        return default
+    try:
+        fval = float(val)
+        return f"{prefix}{fval:,.{decimals}f}"
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_format_capacity(
+    val: Any,
+    default: str = "Not available",
+    decimals: int = 1,
+    unit: str = " units",
+) -> str:
+    """
+    Format a capacity value safely. Returns `default` ('Not available' or 'Unknown')
+    when capacity data is genuinely missing or None. Never fabricates zero.
+    """
+    if val is None:
+        return default
+    try:
+        fval = float(val)
+        return f"{fval:,.{decimals}f}{unit}"
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_format_number(
+    val: Any,
+    default: str = "Unknown",
+    decimals: int = 1,
+    suffix: str = "",
+) -> str:
+    """
+    Format a generic numeric value safely, returning `default` if None or non-numeric.
+    """
+    if val is None:
+        return default
+    try:
+        fval = float(val)
+        return f"{fval:,.{decimals}f}{suffix}"
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_format_lead_time(
+    val: Any,
+    default: str = "Unknown",
+    suffix: str = " days",
+) -> str:
+    """
+    Format a lead time in days safely, returning `default` if None or non-numeric.
+    """
+    if val is None:
+        return default
+    try:
+        fval = float(val)
+        return f"{fval:.0f}{suffix}"
+    except (ValueError, TypeError):
+        return default
+
+
 def classify_node_status(
     node: str,
     simulation_result: Optional[Dict[str, Any]] = None,
@@ -138,7 +211,7 @@ def create_resilient_network_figure(
         mid_y.append(my)
 
         status_str = "<b style='color:red;'>SEVERED ROUTE</b>" if is_broken else "<b style='color:green;'>OPERATIONAL</b>"
-        cap_str = f"{capacity:,.0f} units" if isinstance(capacity, (int, float)) else str(capacity)
+        cap_str = safe_format_capacity(capacity, default="Unknown", decimals=0, unit=" units")
         mid_text.append(
             f"<b>Supply Route:</b> {u} &rarr; {v}<br>"
             f"<b>Status:</b> {status_str}<br>"
@@ -336,45 +409,166 @@ def create_resilient_network_figure(
 
 def build_financial_scenario_from_simulation(
     simulation_result: Dict[str, Any],
-    loss_per_unit: float = 150.0,
-    available_budget: float = 50000.0,
-    max_lead_time_days: float = 14.0,
+    loss_per_unit: Optional[float] = 150.0,
+    available_budget: Optional[float] = 50000.0,
+    max_lead_time_days: Optional[float] = 14.0,
     scenario_id_override: Optional[str] = None,
+    graph: Optional[nx.DiGraph] = None,
 ) -> DisruptionScenario:
     """
     Safe adapter converting Member 3's simulation payload into Member 4's DisruptionScenario.
     Respects anti-double-counting and extracts exact quantified throughput deficits.
+
+    Safely handles:
+    - Direct outgoing capacity loss (when available and positive).
+    - Downstream capacity deficit (when direct loss is not available).
+    - Terminal / sink entity disruptions (e.g. Supplier failures with 0 outgoing edges)
+      by inspecting rated node capacity and inbound feeding edge capacity from the supply graph.
+    - Missing or unrecorded capacity data: accurately records data gaps in metadata without
+      fabricating values or crashing with NoneType comparison errors.
+    - Optional financial constraints (loss_per_unit, available_budget, max_lead_time_days)
+      with safe None-checking.
     """
     payload = get_financial_engine_payload(simulation_result)
 
-    failed_entity = payload.get("failed_entity", "Unknown Entity")
-    direct_loss = payload.get("direct_capacity_loss", 0.0)
-    total_deficit = payload.get("total_downstream_capacity_deficit", 0.0)
+    failed_entity = str(payload.get("failed_entity") or "Unknown Entity")
+    raw_direct_loss = payload.get("direct_capacity_loss")
+    raw_total_deficit = payload.get("total_downstream_capacity_deficit")
 
-    # Determine primary affected quantity: prefer direct capacity loss, fallback to downstream deficit
-    if direct_loss > 0:
-        affected_quantity = float(direct_loss)
-    elif total_deficit > 0:
-        affected_quantity = float(total_deficit)
-    else:
-        # Default minimum unit fallback if unrecorded
-        affected_quantity = 100.0
+    # Safely parse numeric direct loss
+    direct_loss: Optional[float] = None
+    if raw_direct_loss is not None:
+        try:
+            val = float(raw_direct_loss)
+            if not math.isnan(val) and not math.isinf(val):
+                direct_loss = val
+        except (ValueError, TypeError):
+            direct_loss = None
+
+    # Safely parse numeric downstream deficit
+    total_deficit: Optional[float] = None
+    if raw_total_deficit is not None:
+        try:
+            val = float(raw_total_deficit)
+            if not math.isnan(val) and not math.isinf(val):
+                total_deficit = val
+        except (ValueError, TypeError):
+            total_deficit = None
+
+    # Determine primary affected quantity
+    affected_quantity: float = 0.0
+    capacity_source: str = "unrecorded"
+    has_capacity_data: bool = False
+
+    # 1. Prefer direct outgoing capacity loss if quantified and positive
+    if direct_loss is not None and direct_loss > 0:
+        affected_quantity = direct_loss
+        capacity_source = "direct_outgoing_capacity"
+        has_capacity_data = True
+
+    # 2. Fall back to downstream capacity deficit if direct loss was not quantified
+    elif total_deficit is not None and total_deficit > 0:
+        affected_quantity = total_deficit
+        capacity_source = "downstream_capacity_deficit"
+        has_capacity_data = True
+
+    # 3. For terminal/sink nodes, inspect the graph strictly for node rated capacity attribute.
+    # Note: Inbound edge capacity must NEVER be treated as confirmed production volume.
+    elif graph is not None and graph.has_node(failed_entity):
+        node_data = graph.nodes.get(failed_entity, {})
+        rated = node_data.get("capacity")
+        if rated is not None:
+            try:
+                r_val = float(rated)
+                if r_val > 0 and not math.isnan(r_val) and not math.isinf(r_val):
+                    affected_quantity = r_val
+                    capacity_source = "node_rated_capacity"
+                    has_capacity_data = True
+            except (ValueError, TypeError):
+                pass
+
+    # 4. If capacity is truly unrecorded / missing, do not fabricate numbers or borrow inbound flows.
+    # Mark financial impact status as UNQUANTIFIED.
+    if not has_capacity_data:
+        affected_quantity = 0.0
+        capacity_source = "missing_unrecorded"
+
+    is_unquantified = not has_capacity_data
+
+    # Check for recorded inbound feed links to distinguish inbound feed from confirmed node throughput
+    inbound_feed_capacity: Optional[float] = None
+    inbound_feed_details: List[str] = []
+    if graph is not None and graph.has_node(failed_entity):
+        inbound_caps = []
+        for u, _, edata in graph.in_edges(failed_entity, data=True):
+            cap = edata.get("capacity")
+            if cap is not None:
+                try:
+                    c_val = float(cap)
+                    inbound_caps.append(c_val)
+                    mat = edata.get("material", "Material")
+                    inbound_feed_details.append(f"{u} -> {failed_entity} ({mat}: {c_val:,.1f} units)")
+                except (ValueError, TypeError):
+                    pass
+        if inbound_caps:
+            inbound_feed_capacity = float(sum(inbound_caps))
+
+    # Safely convert financial constraints (handling None safely)
+    parsed_loss_per_unit = 150.0
+    if loss_per_unit is not None:
+        try:
+            parsed_loss_per_unit = float(loss_per_unit)
+        except (ValueError, TypeError):
+            parsed_loss_per_unit = 150.0
+
+    parsed_budget: Optional[float] = None
+    if available_budget is not None:
+        try:
+            parsed_budget = float(available_budget)
+        except (ValueError, TypeError):
+            parsed_budget = None
+
+    parsed_lead_time: Optional[float] = None
+    if max_lead_time_days is not None:
+        try:
+            parsed_lead_time = float(max_lead_time_days)
+        except (ValueError, TypeError):
+            parsed_lead_time = None
 
     scen_id = scenario_id_override or f"SCEN-{failed_entity.replace(' ', '-').upper()}"
+
+    missing_warnings = list(payload.get("missing_data_warnings", []))
+    if not has_capacity_data:
+        warn = f"Capacity throughput data is unrecorded for failed entity '{failed_entity}'. Financial impact is UNQUANTIFIED."
+        if inbound_feed_capacity is not None:
+            feed_nodes = [u for u, _ in graph.in_edges(failed_entity)]
+            warn += (
+                f" Note: Inbound feeding link capacity is recorded ({inbound_feed_capacity:,.1f} units from {', '.join(feed_nodes)}), "
+                "but confirmed operational production throughput for this entity is unrecorded. "
+                "Inbound feeding capacity is not assumed to equal node production throughput."
+            )
+        missing_warnings.append(warn)
 
     scenario = DisruptionScenario(
         scenario_id=scen_id,
         affected_quantity=affected_quantity,
-        loss_per_unit=float(loss_per_unit),
+        loss_per_unit=parsed_loss_per_unit,
         disrupted_node=failed_entity,
-        available_budget=float(available_budget),
-        max_lead_time_days=float(max_lead_time_days),
+        available_budget=parsed_budget,
+        max_lead_time_days=parsed_lead_time,
         description=f"Automated resilience scenario for {failed_entity} disruption.",
         additional_metadata={
             "impact_level": payload.get("impact_level"),
             "affected_materials": payload.get("affected_materials"),
             "confirmed_shortages": payload.get("confirmed_shortage_entities"),
             "potential_shortages": payload.get("potential_shortage_entities"),
+            "has_capacity_data": has_capacity_data,
+            "is_unquantified": is_unquantified,
+            "financial_impact_status": "UNQUANTIFIED" if is_unquantified else "VERIFIED",
+            "capacity_source": capacity_source,
+            "inbound_recorded_feed_capacity": inbound_feed_capacity,
+            "inbound_feed_details": inbound_feed_details,
+            "missing_data_warnings": missing_warnings,
         },
     )
 
@@ -391,6 +585,33 @@ def generate_candidate_recovery_options(
     """
     qty = scenario.affected_quantity
     budget = scenario.available_budget if scenario.available_budget is not None else 50000.0
+    has_capacity_data = scenario.additional_metadata.get("has_capacity_data", qty > 0)
+    is_unquantified = scenario.additional_metadata.get("is_unquantified", not has_capacity_data or qty == 0.0)
+
+    # If capacity is completely missing/unrecorded, candidate options must report
+    # available_capacity as None and be clearly flagged as illustrative estimates so
+    # Member 4 honestly flags missing capacity rather than declaring verified feasibility.
+    if is_unquantified or (not has_capacity_data and qty == 0.0):
+        opt1 = RecoveryOption(
+            option_id="OPT-BUFFER-RELEASE",
+            option_type="buffer_stock_release",
+            description="[ILLUSTRATIVE ESTIMATE] Strategic reserve stock release (capacity unverified pending audit)",
+            recovery_cost=round(budget * 0.36, 2),
+            available_capacity=None,  # Missing capacity data
+            lead_time_days=3.0,
+            maximum_acceptable_lead_time_days=scenario.max_lead_time_days,
+        )
+        opt2 = RecoveryOption(
+            option_id="OPT-EXPEDITE-AIR",
+            option_type="expedited_freight",
+            description="[ILLUSTRATIVE ESTIMATE] Air freight replacement shipment (capacity unverified pending audit)",
+            recovery_cost=round(budget * 0.54, 2),
+            available_capacity=None,  # Missing capacity data
+            lead_time_days=6.0,
+            maximum_acceptable_lead_time_days=scenario.max_lead_time_days,
+        )
+        return [opt1, opt2]
+
     unit_cost_est = (budget * 0.4) / max(qty, 1.0)
 
     # Option 1: Fast Reserve Inventory / Safety Buffer Release

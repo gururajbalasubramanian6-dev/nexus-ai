@@ -164,10 +164,8 @@ def _evaluate_entity_shortage(
             except (nx.NetworkXNoPath, nx.NodeNotFound):
                 pass
 
-    operational_inbound_count = operational_graph.in_degree(entity) if entity in operational_graph else 0
-    severed_inbound_count = total_inbound - operational_inbound_count
-
-    # Evaluate capacity on inbound links
+    # Evaluate operational inbound links and inbound capacities
+    operational_inbound_count = 0
     normal_inbound_caps: List[float] = []
     operational_inbound_caps: List[float] = []
     severed_inbound_caps: List[float] = []
@@ -175,27 +173,42 @@ def _evaluate_entity_shortage(
 
     for u, v, d in graph.in_edges(entity, data=True):
         c = d.get("capacity")
+        c_val: Optional[float] = None
         if c is not None:
             try:
                 c_val = float(c)
                 normal_inbound_caps.append(c_val)
-                if operational_graph.has_edge(u, v):
-                    # Check that u itself has active operational source reachability
-                    u_active = (u in active_sources) or any(
-                        nx.has_path(operational_graph, src, u)
-                        for src in active_sources
-                        if src != u
-                    )
-                    if u_active:
-                        operational_inbound_caps.append(c_val)
-                    else:
-                        severed_inbound_caps.append(c_val)
-                else:
-                    severed_inbound_caps.append(c_val)
             except (ValueError, TypeError):
                 has_missing_edge_capacity = True
         else:
             has_missing_edge_capacity = True
+
+        # An incoming link is truly operational if:
+        # 1. The edge exists in operational_graph
+        # 2. Its upstream node u has an active path to a surviving original source
+        is_link_operational = False
+        if operational_graph.has_edge(u, v):
+            try:
+                u_active = (u in active_sources) or any(
+                    nx.has_path(operational_graph, src, u)
+                    for src in active_sources
+                    if src != u
+                )
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                u_active = False
+
+            if u_active:
+                is_link_operational = True
+
+        if is_link_operational:
+            operational_inbound_count += 1
+            if c_val is not None:
+                operational_inbound_caps.append(c_val)
+        else:
+            if c_val is not None:
+                severed_inbound_caps.append(c_val)
+
+    severed_inbound_count = total_inbound - operational_inbound_count
 
     total_normal_inbound_cap = sum(normal_inbound_caps) if normal_inbound_caps else None
     remaining_operational_cap = sum(operational_inbound_caps) if operational_inbound_caps else (0.0 if normal_inbound_caps else None)

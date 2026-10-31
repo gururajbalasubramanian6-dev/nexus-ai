@@ -82,6 +82,10 @@ from agents.dashboard_components import (
     build_financial_scenario_from_simulation,
     create_resilient_network_figure,
     generate_candidate_recovery_options,
+    safe_format_capacity,
+    safe_format_currency,
+    safe_format_lead_time,
+    safe_format_number,
 )
 
 
@@ -540,6 +544,7 @@ def run_streamlit_app() -> None:
             loss_per_unit=unit_loss_input,
             available_budget=budget_input,
             max_lead_time_days=max_lead_time_input,
+            graph=graph,
         )
         candidate_options = generate_candidate_recovery_options(
             scenario=financial_scenario,
@@ -589,10 +594,16 @@ def run_streamlit_app() -> None:
     shared_deps_count = len(shared_only_findings)
     affected_count = len(sim_result.get("affected_entities", []))
     impact_level = sim_result.get("impact_level", "Unknown")
-    gross_loss = financial_result.get("baseline_disruption_loss", 0.0)
-    rec_cost = financial_result.get("recovery_cost", 0.0)
-    est_savings = financial_result.get("estimated_savings", 0.0)
-    residual_loss = financial_result.get("residual_disruption_loss", 0.0)
+    is_unquantified = bool(financial_result.get("is_unquantified", False) or financial_result.get("baseline_disruption_loss") is None)
+    gross_loss = financial_result.get("baseline_disruption_loss")
+    rec_cost = financial_result.get("recovery_cost")
+    est_savings = financial_result.get("estimated_savings")
+    residual_loss = financial_result.get("residual_disruption_loss")
+
+    gross_loss_disp = "UNQUANTIFIED" if is_unquantified else safe_format_currency(gross_loss, default="Not available", decimals=0)
+    rec_cost_disp = safe_format_currency(rec_cost, default="$0", decimals=0)
+    est_savings_disp = "UNQUANTIFIED" if is_unquantified else safe_format_currency(est_savings, default="Not available", decimals=0)
+    residual_loss_disp = "UNQUANTIFIED" if is_unquantified else safe_format_currency(residual_loss, default="Not available", decimals=0)
 
     level_class = {
         "Critical": "badge-critical",
@@ -620,13 +631,13 @@ def run_streamlit_app() -> None:
     # ── Row 2: Financial & Governance Metrics ────────────────────────────────
     kpi_row2 = st.columns([1, 1, 1, 1, 1])
     with kpi_row2[0]:
-        st.metric("Baseline Gross Loss", f"${gross_loss:,.0f}")
+        st.metric("Baseline Gross Loss", gross_loss_disp)
     with kpi_row2[1]:
-        st.metric("Plan Expenditure", f"${rec_cost:,.0f}")
+        st.metric("Plan Expenditure", rec_cost_disp)
     with kpi_row2[2]:
-        st.metric("Net Savings", f"${est_savings:,.0f}")
+        st.metric("Net Savings", est_savings_disp)
     with kpi_row2[3]:
-        st.metric("Residual Risk", f"${residual_loss:,.0f}")
+        st.metric("Residual Risk", residual_loss_disp)
     with kpi_row2[4]:
         # Severity + Governance in a single styled card (matches metric card height)
         sev_label = impact_level.upper()
@@ -706,12 +717,13 @@ def run_streamlit_app() -> None:
         if shared_only_findings:
             shared_df_rows = []
             for r in shared_only_findings:
+                score_str = safe_format_number(r.get("risk_score"), default="Unknown", decimals=1, suffix="/100")
                 shared_df_rows.append({
                     "Dependency Node": r.get("dependency_node"),
                     "Affected Suppliers": ", ".join(r.get("affected_suppliers", [])),
                     "Supplier Count": r.get("affected_supplier_count"),
                     "Dependency Tier": r.get("dependency_tier"),
-                    "Risk Score": f"{r.get('risk_score', 0):.1f}/100",
+                    "Risk Score": score_str,
                     "Risk Level": r.get("risk_level"),
                     "Explanation": r.get("explanation"),
                     "Recommended Investigation": r.get("recommended_investigation"),
@@ -724,11 +736,12 @@ def run_streamlit_app() -> None:
         if risk_findings:
             all_df_rows = []
             for r in risk_findings:
+                score_str = safe_format_number(r.get("risk_score"), default="Unknown", decimals=1, suffix="/100")
                 all_df_rows.append({
                     "Dependency Node": r.get("dependency_node"),
                     "Is Shared?": "Yes" if r.get("is_shared") else "No",
                     "Suppliers": ", ".join(r.get("affected_suppliers", [])),
-                    "Risk Score": f"{r.get('risk_score', 0):.1f}/100",
+                    "Risk Score": score_str,
                     "Risk Level": r.get("risk_level"),
                     "Missing Info": ", ".join(r.get("missing_information", [])) or "None",
                     "Recommended Action": r.get("recommended_investigation"),
@@ -753,7 +766,9 @@ def run_streamlit_app() -> None:
         st.write(f"- **Failed Entity:** `{sim_result.get('failed_entity')}`")
         st.write(f"- **Disruption Type:** {sim_result.get('disruption_type')}")
         st.write(f"- **Impact Classification:** **{sim_result.get('impact_level')}**")
-        st.write(f"- **Direct Capacity Offline:** **{cap_impact.get('estimated_direct_capacity_loss', 0):,.1f} units**")
+        direct_cap_val = cap_impact.get("estimated_direct_capacity_loss")
+        direct_cap_str = safe_format_capacity(direct_cap_val, default="Not available", decimals=1, unit=" units")
+        st.write(f"- **Direct Capacity Offline:** **{direct_cap_str}**")
         st.caption("Note: Anti-double-counting policy strictly prevents adding multi-tier intermediate throughput.")
 
         materials = sim_result.get("affected_materials", [])
@@ -803,9 +818,24 @@ def run_streamlit_app() -> None:
     # Markdown bold/backtick syntax renders correctly (st.success renders
     # plain text only and shows literal ** characters).
     rec_ids = financial_result.get("recommended_option_ids", [])
-    if rec_ids:
-        total_cost = financial_result.get("estimated_total_cost", 0.0)
-        net_savings = financial_result.get("estimated_savings", 0.0)
+    is_unquantified = bool(financial_result.get("is_unquantified", False) or financial_result.get("baseline_disruption_loss") is None)
+
+    if is_unquantified:
+        st.markdown(
+            f"""
+            <div style="background:#422006;border:1px solid #D97706;border-radius:8px;
+                        padding:14px 18px;margin-bottom:12px;">
+              <span style="font-weight:700;color:#FBBF24;">⚠️ FINANCIAL IMPACT UNQUANTIFIED: </span>
+              <span style="color:#FEF3C7;">Disrupted operational throughput volume for <b>{selected_failed_node}</b> is unrecorded in the active dataset.</span>
+              <br>
+              <span style="color:#FDE68A;font-size:0.88rem;">Automated recovery plan optimization is suspended to prevent capital misallocation. Baseline financial loss and net capital preservation cannot be verified without confirmed production volume.</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    elif rec_ids:
+        total_cost_str = safe_format_currency(financial_result.get("estimated_total_cost"), default="Not available", decimals=2)
+        net_savings_str = safe_format_currency(financial_result.get("estimated_savings"), default="Not available", decimals=2)
         plan_ids = ", ".join(f"`{rid}`" for rid in rec_ids)
         st.markdown(
             f"""
@@ -815,10 +845,10 @@ def run_streamlit_app() -> None:
               <span style="color:#F0FDF4;">{', '.join(rec_ids)}</span>
               &nbsp;&mdash;&nbsp;
               <span style="color:#A7F3D0;">Total Plan Cost:</span>
-              <span style="color:#F0FDF4;font-weight:700;"> ${total_cost:,.2f}</span>
+              <span style="color:#F0FDF4;font-weight:700;"> {total_cost_str}</span>
               &nbsp;&nbsp;
               <span style="color:#A7F3D0;">Net Capital Preserved:</span>
-              <span style="color:#6EE7B7;font-weight:700;"> ${net_savings:,.2f}</span>
+              <span style="color:#6EE7B7;font-weight:700;"> {net_savings_str}</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -841,24 +871,27 @@ def run_streamlit_app() -> None:
     all_opts_rows = []
     for f in feasible_opts:
         is_rec = f.get("option_id") in rec_ids
+        opt_id_str = str(f.get("option_id") or "Unknown Option")
         all_opts_rows.append({
-            "Option ID": f.get("option_id") + (" ⭐ [SELECTED]" if is_rec else ""),
+            "Option ID": opt_id_str + (" ⭐ [SELECTED]" if is_rec else ""),
             "Status": "FEASIBLE",
-            "Recovery Cost": f"${f.get('recovery_cost', 0):,.2f}",
-            "Available Capacity": f"{f.get('available_capacity', 0):,.1f}",
-            "Lead Time": f"{f.get('lead_time_days', 0):.0f} days",
-            "Total Plan Cost": f"${f.get('estimated_total_cost', 0):,.2f}",
-            "Net Savings": f"${f.get('estimated_savings', 0):,.2f}",
+            "Recovery Cost": safe_format_currency(f.get("recovery_cost"), default="Unknown", decimals=2),
+            "Available Capacity": safe_format_capacity(f.get("available_capacity"), default="Unknown", decimals=1, unit=""),
+            "Lead Time": safe_format_lead_time(f.get("lead_time_days"), default="Unknown", suffix=" days"),
+            "Total Plan Cost": safe_format_currency(f.get("estimated_total_cost"), default="Unknown", decimals=2),
+            "Net Savings": safe_format_currency(f.get("estimated_savings"), default="Unknown", decimals=2),
             "Constraint Audit": "Satisfies all constraints",
         })
 
     for r in rejected_opts:
+        opt_id_str = str(r.get("option_id") or "Unknown Option")
+        status_label = "UNVERIFIED" if is_unquantified else "REJECTED"
         all_opts_rows.append({
-            "Option ID": r.get("option_id", ""),
-            "Status": "REJECTED",
-            "Recovery Cost": f"${r.get('recovery_cost', 0):,.2f}",
-            "Available Capacity": f"{r.get('available_capacity', 0):,.1f}",
-            "Lead Time": f"{r.get('lead_time_days', 0):.0f} days",
+            "Option ID": opt_id_str,
+            "Status": status_label,
+            "Recovery Cost": safe_format_currency(r.get("recovery_cost"), default="Unknown", decimals=2),
+            "Available Capacity": safe_format_capacity(r.get("available_capacity"), default="Unknown", decimals=1, unit=""),
+            "Lead Time": safe_format_lead_time(r.get("lead_time_days"), default="Unknown", suffix=" days"),
             "Total Plan Cost": "N/A (Infeasible)",
             "Net Savings": "N/A (Infeasible)",
             "Constraint Audit": "; ".join(r.get("rejection_reasons", [])),
@@ -984,13 +1017,21 @@ def run_cli_fallback(args: argparse.Namespace) -> None:
         loss_per_unit=args.loss_per_unit,
         available_budget=args.budget,
         max_lead_time_days=args.max_lead_time,
+        graph=graph,
     )
     candidate_opts = generate_candidate_recovery_options(scenario, graph=graph)
     fin_res = optimize_recovery_plan(scenario, candidate_opts, allow_multi_option=True)
-    print(f"           Baseline Disruption Loss: ${fin_res.get('baseline_disruption_loss', 0):,.2f}")
+    gross_loss_str = safe_format_currency(fin_res.get("baseline_disruption_loss"), default="Not available", decimals=2)
+    tot_cost_str = safe_format_currency(fin_res.get("estimated_total_cost"), default="Not available", decimals=2)
+    sav_str = safe_format_currency(fin_res.get("estimated_savings"), default="Not available", decimals=2)
+    if fin_res.get("is_unquantified"):
+        gross_loss_str = "UNQUANTIFIED (Throughput capacity unrecorded)"
+        tot_cost_str = "UNQUANTIFIED"
+        sav_str = "UNQUANTIFIED"
+    print(f"           Baseline Disruption Loss: {gross_loss_str}")
     print(f"           Selected Recovery Plan:   {fin_res.get('recommended_option_ids')}")
-    print(f"           Total Recovery Cost:      ${fin_res.get('estimated_total_cost', 0):,.2f}")
-    print(f"           Net Estimated Savings:    ${fin_res.get('estimated_savings', 0):,.2f}")
+    print(f"           Total Recovery Cost:      {tot_cost_str}")
+    print(f"           Net Estimated Savings:    {sav_str}")
 
     # 5. Member 5: Decision Explanation
     print("\n[Step 5/5] Synthesizing Member 5 Deterministic Decision Explanation...")
