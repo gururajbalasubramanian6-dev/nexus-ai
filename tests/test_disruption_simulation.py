@@ -419,3 +419,43 @@ def test_raw_material_q_failure_operational_inbound_and_shortage():
     assert details["Supplier C"]["operational_inbound_links"] == 0
     assert details["Supplier C"]["severed_inbound_links"] == 1
     assert details["Supplier C"]["status"] == "confirmed_shortage"
+def test_broken_supply_corridors_and_recommended_actions_aliases():
+    """
+    Verifies that Section D data contracts are satisfied across Processor X, Raw Material P,
+    and Raw Material Q failure scenarios:
+    1. Both 'disrupted_paths' and 'affected_paths' exist and are identical.
+    2. Both 'recommended_actions' and 'recommended_next_actions' exist and are identical.
+    3. Multi-node supply corridors are extracted and non-empty for non-terminal disruptions.
+    """
+    df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
+    graph = build_supply_chain_graph(df)
+
+    # 1. Processor X failure
+    res_x = simulate_disruption(graph, failed_node="Processor X")
+    assert "disrupted_paths" in res_x
+    assert "affected_paths" in res_x
+    assert res_x["disrupted_paths"] == res_x["affected_paths"]
+    assert len(res_x["disrupted_paths"]) == 2
+    assert ["Processor X", "Supplier A"] in res_x["disrupted_paths"]
+    assert ["Processor X", "Supplier B"] in res_x["disrupted_paths"]
+    assert "recommended_actions" in res_x
+    assert "recommended_next_actions" in res_x
+    assert res_x["recommended_actions"] == res_x["recommended_next_actions"]
+    assert len(res_x["recommended_actions"]) >= 4
+
+    # 2. Raw Material P failure
+    res_p = simulate_disruption(graph, failed_node="Raw Material P")
+    assert res_p["disrupted_paths"] == res_p["affected_paths"]
+    assert len(res_p["disrupted_paths"]) == 2
+    assert ["Raw Material P", "Processor X", "Supplier A"] in res_p["disrupted_paths"]
+    assert ["Raw Material P", "Processor X", "Supplier B"] in res_p["disrupted_paths"]
+    assert res_p["recommended_actions"] == res_p["recommended_next_actions"]
+    assert len(res_p["recommended_actions"]) >= 4
+
+    # 3. Raw Material Q failure
+    res_q = simulate_disruption(graph, failed_node="Raw Material Q")
+    assert res_q["disrupted_paths"] == res_q["affected_paths"]
+    assert len(res_q["disrupted_paths"]) == 1
+    assert ["Raw Material Q", "Processor Y", "Supplier C"] in res_q["disrupted_paths"]
+    assert res_q["recommended_actions"] == res_q["recommended_next_actions"]
+    assert len(res_q["recommended_actions"]) >= 3

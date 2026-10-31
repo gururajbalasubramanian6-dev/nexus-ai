@@ -228,7 +228,7 @@ class DecisionExplanationAgent:
         failed_entity = disruption_result.get("failed_entity", "")
         impact_level = disruption_result.get("impact_level", "Unknown")
         affected_entities = disruption_result.get("affected_entities", [])
-        disrupted_paths = disruption_result.get("disrupted_paths") or []
+        disrupted_paths = disruption_result.get("disrupted_paths") or disruption_result.get("affected_paths") or []
 
         # Determine network topology attributes
         out_deg = 0
@@ -522,7 +522,7 @@ class DecisionExplanationAgent:
         potential = disruption_result.get("potential_shortage_entities", [])
         failed_entity = disruption_result.get("failed_entity", "the disrupted entity")
         affected = disruption_result.get("affected_entities", [])
-        paths = disruption_result.get("disrupted_paths") or []
+        paths = disruption_result.get("disrupted_paths") or disruption_result.get("affected_paths") or []
 
         out_deg = 0
         if graph is not None and graph.has_node(failed_entity):

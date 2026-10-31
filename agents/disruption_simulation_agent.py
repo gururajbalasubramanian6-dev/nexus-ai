@@ -748,6 +748,7 @@ def simulate_disruption(
         "disruption_type": effective_disruption_type,
         "affected_entities": affected_entities,
         "affected_paths": affected_paths,
+        "disrupted_paths": affected_paths,  # Backward-compatible alias
         "affected_materials": affected_materials,
         "estimated_capacity_impact": capacity_impact,
         "impact_level": impact_level,
@@ -755,6 +756,7 @@ def simulate_disruption(
         "missing_information": clean_missing_info,
         "assumptions": assumptions,
         "recommended_next_actions": recommended_next_actions,
+        "recommended_actions": recommended_next_actions,  # Backward-compatible alias
         "entity_impact_details": entity_evaluations,
     }
 

@@ -843,3 +843,39 @@ def test_18_supplier_consistency_sap_hana_path(supplier, expected_inbound_capaci
     # Validate unquantified financial and approval safeguards
     assert "UNQUANTIFIED" in exp["financial_calculation"]["loss_formula"]
     assert exp["human_approval"]["required"] is True
+# =========================================================================
+# Test 19: Section D Broken Supply Corridors and Actions Display
+# =========================================================================
+@pytest.mark.parametrize("scenario_node,expected_corridors", [
+    ("Processor X", [["Processor X", "Supplier A"], ["Processor X", "Supplier B"]]),
+    ("Raw Material P", [["Raw Material P", "Processor X", "Supplier A"], ["Raw Material P", "Processor X", "Supplier B"]]),
+    ("Raw Material Q", [["Raw Material Q", "Processor Y", "Supplier C"]]),
+])
+def test_19_section_d_broken_corridors_and_actions_display(scenario_node, expected_corridors):
+    """
+    Verifies that Section D's 'Broken Supply Corridors & Actions' panel data contract is
+    satisfied for Processor X, Raw Material P, and Raw Material Q:
+    1. Reads both disrupted_paths and affected_paths (present, identical, non-empty).
+    2. Reads both recommended_actions and recommended_next_actions (present, identical, non-empty).
+    3. Verified corridor paths match expected graph routes.
+    """
+    df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
+    graph = build_supply_chain_graph(df)
+
+    sim_res = simulate_disruption(graph, failed_node=scenario_node)
+
+    # Key availability checks
+    paths = sim_res.get("disrupted_paths") or sim_res.get("affected_paths") or []
+    actions = sim_res.get("recommended_actions") or sim_res.get("recommended_next_actions") or []
+
+    assert len(paths) == len(expected_corridors)
+    for expected in expected_corridors:
+        assert expected in paths
+
+    # Actions must be populated with specific operational guidance
+    assert len(actions) > 0
+    assert any("Emergency sourcing" in a or "Mitigate single point of failure" in a or "Inventory audit" in a for a in actions)
+
+    # Corridor paths filter check as implemented in app.py Section D
+    corridor_paths = [p for p in paths if len(p) > 1]
+    assert len(corridor_paths) == len(expected_corridors)

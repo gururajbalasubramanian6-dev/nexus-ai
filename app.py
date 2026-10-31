@@ -777,20 +777,27 @@ def run_streamlit_app() -> None:
 
     with d_col2:
         st.markdown("#### Broken Supply Corridors & Actions")
-        paths = sim_result.get("disrupted_paths", [])
-        if paths:
-            path_strings = [" &rarr; ".join(p) for p in paths[:5]]
+        paths = sim_result.get("disrupted_paths") or sim_result.get("affected_paths") or []
+        corridor_paths = [p for p in paths if len(p) > 1]
+        if corridor_paths:
+            path_strings = [" &rarr; ".join(p) for p in corridor_paths[:5]]
             st.write("**Disrupted Paths (Top 5):**")
             for ps in path_strings:
                 st.markdown(f"- {ps}", unsafe_allow_html=True)
-            if len(paths) > 5:
-                st.caption(f"... plus {len(paths) - 5} additional severed sub-paths.")
+            if len(corridor_paths) > 5:
+                st.caption(f"... plus {len(corridor_paths) - 5} additional severed sub-paths.")
+        elif paths and len(paths[0]) <= 1:
+            st.write("**Disrupted Paths:**")
+            st.caption("No downstream corridors severed (outage is localized to terminal node).")
 
-        actions = sim_result.get("recommended_actions", [])
+        actions = sim_result.get("recommended_actions") or sim_result.get("recommended_next_actions") or []
         if actions:
             st.write("**Recommended Next Actions:**")
             for act in actions:
                 st.markdown(f"- {act}")
+
+        if not paths and not actions:
+            st.info("No downstream supply corridors or immediate operational escalations recorded.")
 
     # Entity Breakdown Table (Confirmed Shortages vs Potential)
     st.markdown("#### Entity Shortage Severity Breakdown")
