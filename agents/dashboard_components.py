@@ -12,6 +12,7 @@ Author: Nexus-AI Team (Member 5)
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import networkx as nx
 import pandas as pd
@@ -166,12 +167,28 @@ def create_resilient_network_figure(
     simulation_result: Optional[Dict[str, Any]] = None,
     selected_entity: Optional[str] = None,
     title: str = "Nexus-AI: Multi-Tier Supply Chain Resilience Map",
+    animate: bool = True,
+    show_replay: bool = False,
+    show_propagation_signal: bool = False,
+    **kwargs: Any,
 ) -> go.Figure:
     """
     Generates an interactive, state-aware Plotly visualization of the supply chain network.
-    Dynamically highlights disrupted nodes, confirmed shortages, potential shortages,
-    and severed vs. operational transport routes.
+    Features:
+    - Subtle glowing halo auras and smooth pulsing animations on nodes.
+    - Moving material particles flowing along operational connections in pipeline fashion.
+    - Shockwave red pulsing visualization on disrupted failure roots and severed corridors.
+    - Clear visual distinction for confirmed shortages and affected downstream suppliers.
+    - Interactive Play/Pause/Replay telemetry controls and reduced-motion support.
     """
+    # Safe fallback handling for kwargs
+    if "animate" in kwargs:
+        animate = bool(kwargs["animate"])
+    if "show_replay" in kwargs:
+        show_replay = bool(kwargs["show_replay"])
+    if "show_propagation_signal" in kwargs:
+        show_propagation_signal = bool(kwargs["show_propagation_signal"])
+
     fig = go.Figure()
     if graph.number_of_nodes() == 0:
         fig.update_layout(
@@ -205,6 +222,13 @@ def create_resilient_network_figure(
                 if f"{u} -> {v}" in failed_entity:
                     failed_edges.add((u, v))
 
+        # Include multi-hop cascade paths when in propagation telemetry mode
+        if show_propagation_signal:
+            paths = simulation_result.get("affected_paths") or simulation_result.get("disrupted_paths") or []
+            for path in paths:
+                for i in range(len(path) - 1):
+                    failed_edges.add((path[i], path[i + 1]))
+
     # 3. Process Corridors: Line segments, directed annotations & midpoints
     annotations = []
     op_line_x: List[Optional[float]] = []
@@ -212,6 +236,8 @@ def create_resilient_network_figure(
     sev_line_x: List[Optional[float]] = []
     sev_line_y: List[Optional[float]] = []
     mid_x, mid_y, mid_text, mid_colors = [], [], [], []
+    op_edges: List[Tuple[str, str]] = []
+    sev_edges: List[Tuple[str, str]] = []
 
     for u, v, data in graph.edges(data=True):
         x0, y0 = pos[u]
@@ -225,9 +251,11 @@ def create_resilient_network_figure(
         if is_broken:
             sev_line_x.extend([x0, x1, None])
             sev_line_y.extend([y0, y1, None])
+            sev_edges.append((u, v))
         else:
             op_line_x.extend([x0, x1, None])
             op_line_y.extend([y0, y1, None])
+            op_edges.append((u, v))
 
         # Waypoint midpoints
         mx = (x0 + x1) / 2.0
@@ -285,7 +313,7 @@ def create_resilient_network_figure(
             )
         )
 
-    # Add Operational Corridors line trace
+    # Trace: Operational Corridors line trace
     if op_line_x:
         fig.add_trace(
             go.Scatter(
@@ -300,7 +328,7 @@ def create_resilient_network_figure(
             )
         )
 
-    # Add Severed Corridors line trace
+    # Trace: Severed Corridors line trace
     if sev_line_x:
         fig.add_trace(
             go.Scatter(
@@ -315,7 +343,7 @@ def create_resilient_network_figure(
             )
         )
 
-    # Add Route Telemetry Waypoint trace
+    # Trace: Route Telemetry Waypoint trace
     if mid_x:
         fig.add_trace(
             go.Scatter(
@@ -335,7 +363,154 @@ def create_resilient_network_figure(
             )
         )
 
-    # 4. Group Nodes by State & Category
+    # Trace: Moving Material Particles along Operational Corridors
+    particle_trace_idx: Optional[int] = None
+    initial_px: List[float] = []
+    initial_py: List[float] = []
+    for u, v in op_edges:
+        x0, y0 = pos[u]
+        x1, y1 = pos[v]
+        for p in (0.25, 0.75):
+            initial_px.append(x0 + p * (x1 - x0))
+            initial_py.append(y0 + p * (y1 - y0))
+
+    if animate and op_edges:
+        particle_trace_idx = len(fig.data)
+        fig.add_trace(
+            go.Scatter(
+                x=initial_px,
+                y=initial_py,
+                mode="markers",
+                marker=dict(
+                    size=7,
+                    color="#38BDF8",
+                    symbol="circle",
+                    line=dict(color="#FFFFFF", width=1.5),
+                ),
+                hoverinfo="none",
+                name="Active Material Flow",
+                showlegend=True,
+            )
+        )
+
+    # Trace: Moving Disruption Shock Particles along Severed Corridors (Feature 3)
+    disrupt_particle_trace_idx: Optional[int] = None
+    initial_dx: List[float] = []
+    initial_dy: List[float] = []
+    if show_propagation_signal and animate and sev_edges:
+        for u, v in sev_edges:
+            x0, y0 = pos[u]
+            x1, y1 = pos[v]
+            for p in (0.30, 0.75):
+                initial_dx.append(x0 + p * (x1 - x0))
+                initial_dy.append(y0 + p * (y1 - y0))
+
+        disrupt_particle_trace_idx = len(fig.data)
+        fig.add_trace(
+            go.Scatter(
+                x=initial_dx,
+                y=initial_dy,
+                mode="markers",
+                marker=dict(
+                    size=9,
+                    color="#F59E0B",
+                    symbol="diamond",
+                    line=dict(color="#FFFFFF", width=1.2),
+                ),
+                hoverinfo="none",
+                name="Disruption Shock Signal",
+                showlegend=True,
+            )
+        )
+
+    # Trace: Origin Expanding Shockwave Ring (Feature 3)
+    origin_shockwave_trace_idx: Optional[int] = None
+    if show_propagation_signal and animate and failed_entity and failed_entity in pos:
+        fx_orig, fy_orig = pos[failed_entity]
+        origin_shockwave_trace_idx = len(fig.data)
+        fig.add_trace(
+            go.Scatter(
+                x=[fx_orig],
+                y=[fy_orig],
+                mode="markers",
+                marker=dict(
+                    size=[34],
+                    color="rgba(0,0,0,0)",
+                    symbol="circle-open",
+                    line=dict(color="#EF4444", width=3.0),
+                ),
+                hoverinfo="none",
+                name="Origin Expanding Shockwave",
+                showlegend=False,
+            )
+        )
+
+    # Trace: Node Glowing Aura / Pulsing Halos (placed under foreground nodes)
+    halo_trace_idx: Optional[int] = None
+    halo_x: List[float] = []
+    halo_y: List[float] = []
+    halo_sizes: List[float] = []
+    halo_colors: List[str] = []
+    halo_line_colors: List[str] = []
+    halo_line_widths: List[float] = []
+    halo_node_keys: List[str] = []
+
+    for node in graph.nodes():
+        status, _ = classify_node_status(node, simulation_result)
+        node_type = str(graph.nodes[node].get("node_type", "")).lower()
+        hx, hy = pos[node]
+        halo_x.append(hx)
+        halo_y.append(hy)
+        halo_node_keys.append(status)
+
+        if status == "failed":
+            halo_sizes.append(44.0)
+            halo_colors.append("rgba(239, 68, 68, 0.40)")
+            halo_line_colors.append("#EF4444")
+            halo_line_widths.append(2.5)
+        elif status == "confirmed_shortage":
+            halo_sizes.append(36.0)
+            halo_colors.append("rgba(244, 63, 94, 0.35)")
+            halo_line_colors.append("#FB7185")
+            halo_line_widths.append(2.0)
+        elif status == "potentially_affected":
+            halo_sizes.append(32.0)
+            halo_colors.append("rgba(245, 158, 11, 0.30)")
+            halo_line_colors.append("#FBBF24")
+            halo_line_widths.append(1.8)
+        else:
+            halo_sizes.append(28.0)
+            if "raw" in node_type:
+                halo_colors.append("rgba(6, 182, 212, 0.22)")
+                halo_line_colors.append("rgba(6, 182, 212, 0.6)")
+            elif "proc" in node_type:
+                halo_colors.append("rgba(56, 189, 248, 0.22)")
+                halo_line_colors.append("rgba(56, 189, 248, 0.6)")
+            else:
+                halo_colors.append("rgba(16, 185, 129, 0.22)")
+                halo_line_colors.append("rgba(16, 185, 129, 0.6)")
+            halo_line_widths.append(1.2)
+
+    if animate and halo_x:
+        halo_trace_idx = len(fig.data)
+        fig.add_trace(
+            go.Scatter(
+                x=halo_x,
+                y=halo_y,
+                mode="markers",
+                marker=dict(
+                    size=halo_sizes,
+                    color=halo_colors,
+                    symbol="circle",
+                    line=dict(color=halo_line_colors, width=halo_line_widths),
+                ),
+                hoverinfo="none",
+                name="Node Resonance Aura",
+                showlegend=False,
+            )
+        )
+
+    # 4. Group Nodes by State & Category for Foreground Nodes
     status_groups: Dict[str, Dict[str, Any]] = {
         "failed": {
             "nodes": [],
@@ -488,15 +663,196 @@ def create_resilient_network_figure(
             )
         )
 
-    # 6. Overall Layout Styling
+    # 6. Build Animation Frames if enabled
+    if animate and (
+        particle_trace_idx is not None
+        or halo_trace_idx is not None
+        or disrupt_particle_trace_idx is not None
+        or origin_shockwave_trace_idx is not None
+    ):
+        NUM_FRAMES = 16
+        frames = []
+        anim_traces = []
+        if particle_trace_idx is not None:
+            anim_traces.append(particle_trace_idx)
+        if halo_trace_idx is not None:
+            anim_traces.append(halo_trace_idx)
+        if disrupt_particle_trace_idx is not None:
+            anim_traces.append(disrupt_particle_trace_idx)
+        if origin_shockwave_trace_idx is not None:
+            anim_traces.append(origin_shockwave_trace_idx)
+
+        for f in range(NUM_FRAMES):
+            frame_data = []
+
+            # A. Update moving material particles along operational corridors
+            if particle_trace_idx is not None:
+                fx, fy = [], []
+                for u, v in op_edges:
+                    x0, y0 = pos[u]
+                    x1, y1 = pos[v]
+                    for p in range(2):
+                        tau = ((f / NUM_FRAMES) + p * 0.5) % 1.0
+                        t = 0.16 + tau * 0.68
+                        fx.append(x0 + t * (x1 - x0))
+                        fy.append(y0 + t * (y1 - y0))
+                frame_data.append(go.Scatter(x=fx, y=fy))
+
+            # B. Update pulsating node halos
+            if halo_trace_idx is not None:
+                fh_sizes = []
+                pulse = math.sin(2 * math.pi * f / NUM_FRAMES)
+                for key in halo_node_keys:
+                    if key == "failed":
+                        fh_sizes.append(44.0 + 10.0 * pulse)
+                    elif key == "confirmed_shortage":
+                        fh_sizes.append(36.0 + 6.0 * pulse)
+                    elif key == "potentially_affected":
+                        fh_sizes.append(32.0 + 4.0 * pulse)
+                    else:
+                        fh_sizes.append(28.0 + 2.5 * pulse)
+                frame_data.append(
+                    go.Scatter(
+                        marker=dict(
+                            size=fh_sizes,
+                            color=halo_colors,
+                            symbol="circle",
+                            line=dict(color=halo_line_colors, width=halo_line_widths),
+                        )
+                    )
+                )
+
+            # C. Update disruption shock signal particles along severed corridors (Feature 3)
+            if disrupt_particle_trace_idx is not None:
+                dx, dy = [], []
+                for u, v in sev_edges:
+                    x0, y0 = pos[u]
+                    x1, y1 = pos[v]
+                    # Compute hop depth from failed origin for topological cascade
+                    try:
+                        hop_depth = (
+                            nx.shortest_path_length(graph, failed_entity, u)
+                            if (failed_entity in graph and nx.has_path(graph, failed_entity, u))
+                            else 0
+                        )
+                    except Exception:
+                        hop_depth = 0
+
+                    for p in range(2):
+                        tau = ((f / NUM_FRAMES) - (hop_depth * 0.35) + p * 0.5) % 1.0
+                        t = 0.16 + tau * 0.68
+                        dx.append(x0 + t * (x1 - x0))
+                        dy.append(y0 + t * (y1 - y0))
+                frame_data.append(go.Scatter(x=dx, y=dy))
+
+            # D. Update origin expanding shockwave ring (Feature 3)
+            if origin_shockwave_trace_idx is not None:
+                tau = f / NUM_FRAMES
+                shock_sz = 32.0 + 44.0 * tau
+                alpha = max(0.08, 0.95 * (1.0 - tau))
+                shock_col = f"rgba(239, 68, 68, {alpha:.2f})"
+                shock_w = max(1.0, 3.5 * (1.0 - tau * 0.7))
+                frame_data.append(
+                    go.Scatter(
+                        marker=dict(
+                            size=[shock_sz],
+                            color="rgba(0,0,0,0)",
+                            symbol="circle-open",
+                            line=dict(color=shock_col, width=shock_w),
+                        )
+                    )
+                )
+
+            frames.append(
+                go.Frame(
+                    data=frame_data,
+                    traces=anim_traces,
+                    name=f"frame_{f}",
+                )
+            )
+
+        fig.frames = frames
+
+    # 7. Animation Controls (Play/Pause/Replay Updatemenus)
+    updatemenus = []
+    if animate and fig.frames:
+        buttons = [
+            dict(
+                label="▶ Play Flow",
+                method="animate",
+                args=[
+                    None,
+                    dict(
+                        frame=dict(duration=80, redraw=False),
+                        fromcurrent=False,
+                        mode="immediate",
+                        loop=True,
+                        transition=dict(duration=0),
+                    ),
+                ],
+            ),
+            dict(
+                label="⏸ Pause",
+                method="animate",
+                args=[
+                    [None],
+                    dict(
+                        frame=dict(duration=0, redraw=False),
+                        mode="immediate",
+                        transition=dict(duration=0),
+                    ),
+                ],
+            ),
+        ]
+
+        if show_replay:
+            buttons.append(
+                dict(
+                    label="🔁 Replay",
+                    method="animate",
+                    args=[
+                        ["frame_0"],
+                        dict(
+                            frame=dict(duration=80, redraw=False),
+                            fromcurrent=False,
+                            mode="immediate",
+                            loop=True,
+                            transition=dict(duration=0),
+                        ),
+                    ],
+                )
+            )
+
+        updatemenus = [
+            dict(
+                type="buttons",
+                direction="right",
+                x=0.98,
+                y=1.06,
+                xanchor="right",
+                yanchor="bottom",
+                pad=dict(r=6, t=4, b=4, l=6),
+                bgcolor="#151F32",
+                bordercolor="#334155",
+                borderwidth=1,
+                font=dict(color="#F8FAFC", size=11, family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif"),
+                active=-1,
+                buttons=buttons,
+            )
+        ]
+
+    # 8. Overall Layout Styling
     fig.update_layout(
         template="plotly_dark",
         title=dict(
             text=f"<b>{title}</b>",
-            font=dict(size=17, color="#F8FAFC", family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif"),
+            font=dict(size=16, color="#F8FAFC", family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif"),
             x=0.02,
-            y=0.96,
+            y=0.97,
+            xanchor="left",
+            yanchor="top",
         ),
+        updatemenus=updatemenus,
         annotations=annotations,
         showlegend=True,
         legend=dict(
@@ -517,7 +873,7 @@ def create_resilient_network_figure(
             font=dict(color="#F8FAFC", size=12),
         ),
         hovermode="closest",
-        margin=dict(b=70, l=40, r=40, t=55),
+        margin=dict(b=70, l=40, r=40, t=75),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         plot_bgcolor="#0A101D",
@@ -599,6 +955,33 @@ def render_risk_card(finding: Dict[str, Any]) -> str:
             f'</div>'
         )
 
+    # Format explanation into a clean vertical list with highlighted penalties and prominent final score
+    calc_items = []
+    clean_expl = re.sub(r'\.?\s*Final score:\s*[\d\.]+/100\.?', '', explanation, flags=re.IGNORECASE).strip()
+    raw_lines = [item.strip() for item in clean_expl.split(";") if item.strip()]
+
+    for line_item in raw_lines:
+        line_clean = line_item.rstrip(".")
+        # Highlight numerical penalties like (+35), (+15 uncertainty penalty), (+10), (+5)
+        line_highlighted = re.sub(
+            r'(\(\+[0-9]+(?:\s+[^)]+)?\))',
+            r'<span style="background:rgba(245,158,11,0.15); color:#FBBF24; border:1px solid rgba(245,158,11,0.35); padding:2px 8px; border-radius:6px; font-weight:700; font-family:monospace; font-size:0.75rem; margin-left:6px;">\1</span>',
+            line_clean
+        )
+        calc_items.append(
+            f'<div style="padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.06); display:flex; justify-content:space-between; align-items:center; font-size:0.78rem; color:#CBD5E1;">'
+            f'<span>&bull; {line_highlighted}</span>'
+            f'</div>'
+        )
+
+    calc_list_html = "".join(calc_items) if calc_items else f'<div style="font-size:0.78rem; color:#CBD5E1;">{explanation}</div>'
+    final_score_banner = (
+        f'<div style="margin-top:10px; padding-top:8px; border-top:1px solid #1E293B; display:flex; justify-content:space-between; align-items:center;">'
+        f'<span style="font-size:0.80rem; font-weight:700; color:#F8FAFC;">Final Calculated Vulnerability Score:</span>'
+        f'<span style="font-size:1.15rem; font-weight:800; color:{score_color}; font-family:monospace;">{score:.1f} / 100</span>'
+        f'</div>'
+    )
+
     return f"""<div style="background:#151F32; border:1px solid #1E293B; border-top:3px solid {border_color}; border-radius:10px; padding:18px 20px; margin-bottom:14px; box-shadow:0 4px 16px rgba(0,0,0,0.35);">
 <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px; margin-bottom:12px;">
 <div>
@@ -634,9 +1017,10 @@ SUPPLY CHAIN CORRIDOR: <span style="color:#38BDF8;">{tier}</span>
 <div style="font-size:0.78rem; color:#CBD5E1; line-height:1.4;">{rec}</div>
 {missing_html}
 <details style="margin-top:8px; cursor:pointer;">
-<summary style="font-size:0.74rem; color:#38BDF8; font-weight:700;">🔬 View Technical Score Calculation & Penalty Details</summary>
-<div style="margin-top:6px; font-size:0.75rem; color:#94A3B8; line-height:1.4; background:#070B14; padding:8px 10px; border-radius:6px; border:1px solid #1E293B;">
-{explanation}
+<summary style="font-size:0.74rem; color:#38BDF8; font-weight:700; outline:none;">🔬 View Technical Score Calculation & Penalty Details</summary>
+<div style="margin-top:8px; background:#070B14; padding:10px 14px; border-radius:8px; border:1px solid #1E293B;">
+{calc_list_html}
+{final_score_banner}
 </div>
 </details>
 </div>
@@ -892,3 +1276,333 @@ def generate_candidate_recovery_options(
     )
 
     return [opt1, opt2, opt3, opt4]
+
+# -----------------------------------------------------------------------------
+# Feature 2: Five-Agent Workflow Orchestration Panel Component
+# -----------------------------------------------------------------------------
+
+AGENT_THEMES = {
+    "mapping": {
+        "order": 1,
+        "name": "Mapping Agent",
+        "role": "Dependency Graph",
+        "color": "#3B82F6",       # Blue
+        "glow": "rgba(59, 130, 246, 0.45)",
+        "accent_class": "agent-accent-blue",
+        "proc_class": "agent-processing-blue",
+        "icon": "🗺️",
+    },
+    "risk": {
+        "order": 2,
+        "name": "Risk Detection Agent",
+        "role": "Bottlenecks & SPOFs",
+        "color": "#06B6D4",       # Cyan
+        "glow": "rgba(6, 182, 212, 0.45)",
+        "accent_class": "agent-accent-cyan",
+        "proc_class": "agent-processing-cyan",
+        "icon": "🛡️",
+    },
+    "simulation": {
+        "order": 3,
+        "name": "Disruption Simulation Agent",
+        "role": "Shock & Blast Radius",
+        "color": "#F59E0B",       # Amber
+        "glow": "rgba(245, 158, 11, 0.45)",
+        "accent_class": "agent-accent-amber",
+        "proc_class": "agent-processing-amber",
+        "icon": "⚡",
+    },
+    "optimization": {
+        "order": 4,
+        "name": "Financial Optimization Agent",
+        "role": "Cost & Lead Time LP",
+        "color": "#10B981",       # Green
+        "glow": "rgba(16, 185, 129, 0.45)",
+        "accent_class": "agent-accent-green",
+        "proc_class": "agent-processing-green",
+        "icon": "💰",
+    },
+    "explanation": {
+        "order": 5,
+        "name": "Decision Explanation Agent",
+        "role": "Strategy & Governance",
+        "color": "#8B5CF6",       # Purple
+        "glow": "rgba(139, 92, 246, 0.45)",
+        "accent_class": "agent-accent-purple",
+        "proc_class": "agent-processing-purple",
+        "icon": "⚖️",
+    },
+}
+
+
+def render_five_agent_workflow_panel(
+    agents_state: List[Dict[str, Any]],
+    total_pipeline_ms: Optional[float] = None,
+    active_run_id: Optional[str] = None,
+    is_live_executing: bool = False,
+    current_agent_idx: Optional[int] = None,
+) -> str:
+    """
+    Renders an enterprise Five-Agent Workflow Orchestration Panel showing real-time
+    activation states (WAITING, PROCESSING, COMPLETED, ERROR) across the 5 specialized
+    resilience agents with connecting pipeline flow and live metrics.
+
+    NOTE: The returned HTML is stripped of leading indentation and internal blank lines
+    to strictly prevent Streamlit's Markdown renderer from treating indented HTML blocks
+    as literal <pre><code> code blocks.
+    """
+    cards_html = []
+    completed_count = sum(1 for a in agents_state if a.get("state") == "COMPLETED")
+    has_error = any(a.get("state") == "ERROR" for a in agents_state)
+
+    for i, a in enumerate(agents_state):
+        agent_id = a.get("id", "mapping")
+        meta = AGENT_THEMES.get(agent_id, AGENT_THEMES["mapping"])
+        state = a.get("state", "WAITING")
+        duration = a.get("duration_ms", 0.0)
+        summary = a.get("summary", "")
+        error_msg = a.get("error")
+
+        if state == "PROCESSING":
+            card_class = f"agent-workflow-card agent-card-processing {meta['proc_class']}"
+            badge_html = '<span class="agent-status-badge badge-state-processing"><span class="agent-spinner"></span> ACTIVE</span>'
+            footer_html = (
+                f'<div class="agent-progress-track"><div class="agent-progress-bar" style="background:{meta["color"]};"></div></div>'
+                f'<div style="font-size:0.70rem; color:{meta["color"]}; font-weight:700; margin-top:4px;">Computing...</div>'
+            )
+        elif state == "COMPLETED":
+            card_class = f"agent-workflow-card agent-card-completed {meta['accent_class']}"
+            badge_html = '<span class="agent-status-badge badge-state-completed">✓ DONE</span>'
+            summary_disp = summary or "Analysis Complete"
+            footer_html = (
+                f'<div style="font-size:0.74rem; font-weight:600; color:#F8FAFC; line-height:1.35; margin-bottom:4px; word-break:normal; white-space:normal;">{summary_disp}</div>'
+                f'<div style="font-size:0.68rem; color:#64748B; font-family:monospace; margin-top:auto;">⚡ {duration:.1f}ms</div>'
+            )
+        elif state == "ERROR":
+            card_class = "agent-workflow-card agent-card-error"
+            badge_html = '<span class="agent-status-badge badge-state-error">✕ ERROR</span>'
+            err_text = str(error_msg or "Failed")[:35]
+            footer_html = f'<div style="font-size:0.70rem; color:#FCA5A5; font-weight:600; line-height:1.2;">{err_text}</div>'
+        else:  # WAITING
+            card_class = "agent-workflow-card agent-card-waiting"
+            badge_html = '<span class="agent-status-badge badge-state-waiting">⏳ STANDBY</span>'
+            footer_html = '<div style="font-size:0.70rem; color:#64748B;">Awaiting upstream trigger</div>'
+
+        card = (
+            f'<div class="{card_class}">'
+            f'<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">'
+            f'<div style="display:flex; align-items:center; gap:6px;">'
+            f'<span style="font-size:1.10rem; line-height:1;">{meta["icon"]}</span>'
+            f'<span class="agent-order-tag">0{meta["order"]}</span>'
+            f'</div>'
+            f'{badge_html}'
+            f'</div>'
+            f'<div style="flex-grow:1; display:flex; flex-direction:column; justify-content:center; margin:4px 0 6px 0;">'
+            f'<div class="agent-card-name" style="color:{meta["color"]};">{meta["name"]}</div>'
+            f'<div class="agent-card-role">{meta["role"]}</div>'
+            f'</div>'
+            f'<div style="margin-top:auto; padding-top:6px; border-top:1px solid rgba(255,255,255,0.06);">'
+            f'{footer_html}'
+            f'</div>'
+            f'</div>'
+        )
+        cards_html.append(card)
+
+    cards_joined = "".join(cards_html)
+
+    # Status Banner Message
+    if has_error:
+        status_html = '<span style="color:#F87171; font-weight:700;">⚠️ Pipeline Interrupted: One or more agents encountered an error</span>'
+    elif is_live_executing and current_agent_idx is not None and current_agent_idx < len(agents_state):
+        curr_id = agents_state[current_agent_idx].get("id", "")
+        curr_meta = AGENT_THEMES.get(curr_id, {})
+        curr_name = agents_state[current_agent_idx].get("name") or curr_meta.get("name", "Agent")
+        status_html = f'<span style="color:#38BDF8; font-weight:600;"><span class="telemetry-pulse"></span> Executing Agent {current_agent_idx + 1}/5: {curr_name}...</span>'
+    elif completed_count == 5:
+        total_time_str = f" &bull; Total Pipeline Runtime: {total_pipeline_ms:.1f}ms" if total_pipeline_ms else ""
+        run_id_str = f" &bull; Run ID: <code>{active_run_id[:8]}</code>" if active_run_id else ""
+        status_html = f'<span style="color:#34D399; font-weight:700;">✓ 5/5 Specialized Resilience Agents Synchronized{total_time_str}{run_id_str}</span>'
+    else:
+        status_html = f'<span style="color:#94A3B8; font-weight:600;">{completed_count}/5 Agents Completed</span>'
+
+    panel_html = (
+        f'<div class="agent-orchestration-panel">'
+        f'<div class="agent-panel-header">'
+        f'<div style="display:flex; align-items:center; gap:8px;">'
+        f'<span class="telemetry-pill telemetry-standby" style="font-size:0.70rem; padding:2px 8px; font-weight:700;">'
+        f'AGENT PIPELINE'
+        f'</span>'
+        f'<span style="font-size:0.86rem; font-weight:800; color:#F8FAFC; letter-spacing:-0.01em;">Autonomous Disruption Analysis & Orchestration</span>'
+        f'</div>'
+        f'<div style="font-size:0.75rem;">'
+        f'{status_html}'
+        f'</div>'
+        f'</div>'
+        f'<div class="workflow-pipeline-grid">'
+        f'{cards_joined}'
+        f'</div>'
+        f'</div>'
+    )
+    # Strip any possible leading/trailing whitespace or newlines so Markdown never parses as a code block
+    return "".join(line.strip() for line in panel_html.splitlines() if line.strip())
+
+
+def create_disruption_propagation_figure(
+    graph: nx.DiGraph,
+    simulation_result: Optional[Dict[str, Any]] = None,
+    selected_entity: Optional[str] = None,
+    title: Optional[str] = None,
+    animate: bool = True,
+) -> go.Figure:
+    """
+    Renders an interactive animated Disruption Propagation canvas demonstrating
+    how an operational shock originating at a selected entity flows through
+    the multi-tier supply chain network to downstream partners.
+
+    Feature 3 Highlights:
+    - Origin Expanding Shockwave Ring around failed entity (prominent red radar pulse).
+    - Severed Corridors with Amber / Crimson Disruption Shock Particles traveling downstream.
+    - Operational Corridors with Blue Material Flow Particles.
+    - Updatemenus with Play, Pause, and Replay controls.
+    - Static mode fallback for reduced motion.
+    """
+    if title is None:
+        failed_name = (
+            simulation_result.get("failed_entity", selected_entity or "Target Facility")
+            if simulation_result
+            else (selected_entity or "Target Facility")
+        )
+        title = f"Live Disruption Propagation Flow: {failed_name}"
+
+    return create_resilient_network_figure(
+        graph=graph,
+        simulation_result=simulation_result,
+        selected_entity=selected_entity,
+        title=title,
+        animate=animate,
+        show_replay=True,
+        show_propagation_signal=True,
+    )
+
+
+def render_disruption_propagation_summary(
+    simulation_result: Optional[Dict[str, Any]],
+    graph: Optional[nx.DiGraph] = None,
+) -> str:
+    """
+    Renders an executive disruption propagation summary component for Feature 3.
+    Displays:
+    - Disruption origin node and operational role
+    - Disruption severity / impact level with status badge
+    - Confirmed shortages vs. potentially affected entities
+    - Total affected downstream entities
+    - Severed connections count and direct capacity loss
+    - Directional propagation cascade flow
+
+    NOTE: The returned HTML is stripped of leading whitespace and internal blank lines
+    to strictly prevent Streamlit's Markdown renderer from treating indented HTML blocks
+    as literal <pre><code> code blocks.
+    """
+    if not simulation_result:
+        return (
+            '<div style="background:#151F32; border:1px solid #1E293B; border-radius:10px; padding:16px; margin-bottom:14px; text-align:center; color:#94A3B8;">'
+            'No active disruption simulation loaded. Baseline network operational.'
+            '</div>'
+        )
+
+    failed_entity = simulation_result.get("failed_entity", "Unknown")
+    impact_level = str(simulation_result.get("impact_level", "Medium")).capitalize()
+    disruption_type = simulation_result.get("disruption_type", "Operational Outage")
+    affected_entities = simulation_result.get("affected_entities", [])
+    affected_count = len(affected_entities)
+
+    # Determine node role and icon
+    node_role = "Entity"
+    if graph and failed_entity in graph:
+        node_role = str(graph.nodes[failed_entity].get("node_type", "Asset")).title()
+
+    # Confirmed shortages vs potentially affected
+    entity_details = simulation_result.get("entity_impact_details", [])
+    confirmed_nodes = [
+        e.get("entity", "") for e in entity_details
+        if e.get("status") == "confirmed_shortage" or e.get("confirmed_shortage")
+    ]
+    potential_nodes = [
+        e.get("entity", "") for e in entity_details
+        if e.get("status") == "potentially_affected" or e.get("potentially_affected")
+    ]
+    confirmed_count = len(confirmed_nodes)
+    potential_count = len(potential_nodes)
+
+    # Severed connections count
+    severed_edges = set()
+    if graph:
+        for u, v in graph.edges():
+            if u == failed_entity or v == failed_entity:
+                severed_edges.add((u, v))
+        paths = simulation_result.get("affected_paths") or simulation_result.get("disrupted_paths") or []
+        for p in paths:
+            for i in range(len(p) - 1):
+                severed_edges.add((p[i], p[i + 1]))
+    severed_count = len(severed_edges)
+
+    # Severity tier styling
+    sev_class = {
+        "Critical": "badge-critical",
+        "High": "badge-high",
+        "Medium": "badge-medium",
+        "Low": "badge-low",
+    }.get(impact_level, "badge-medium")
+
+    sev_color = {
+        "Critical": "#FB7185",
+        "High": "#FBBF24",
+        "Medium": "#FDE047",
+        "Low": "#34D399",
+    }.get(impact_level, "#FDE047")
+
+    cap_impact = simulation_result.get("estimated_capacity_impact", {})
+    direct_loss = cap_impact.get("estimated_direct_capacity_loss")
+    loss_disp = safe_format_capacity(direct_loss, default="Unquantified", decimals=1, unit=" units")
+
+    confirmed_disp = f"{confirmed_count} Confirmed" if confirmed_count > 0 else "0 Confirmed"
+    potential_disp = f"{potential_count} Buffered" if potential_count > 0 else "0 Buffered"
+
+    lines = [
+        '<div class="propagation-impact-summary">',
+        '  <div class="propagation-summary-header">',
+        '    <div class="propagation-summary-title-group">',
+        '      <div class="propagation-summary-kicker">LIVE BLAST RADIUS & SHOCK PROPAGATION TELEMETRY</div>',
+        f'     <div class="propagation-summary-title">💥 Disruption Origin: <span style="color:#F8FAFC;">{failed_entity}</span> <span style="font-size:0.85rem; font-weight:600; color:#38BDF8; margin-left:8px;">({node_role})</span></div>',
+        '    </div>',
+        '    <div class="propagation-summary-badges">',
+        f'     <span class="{sev_class}">{impact_level.upper()} IMPACT</span>',
+        f'     <span class="badge-critical" style="background:rgba(239,68,68,0.2) !important;">{disruption_type.upper()}</span>',
+        '    </div>',
+        '  </div>',
+        '  <div class="propagation-summary-metrics-grid">',
+        '    <div class="propagation-summary-metric-card">',
+        '      <div class="propagation-metric-label">Downstream Blast Radius</div>',
+        f'     <div class="propagation-metric-value" style="color:#FB7185;">{affected_count} <span style="font-size:0.82rem; font-weight:500; color:#94A3B8;">Entities</span></div>',
+        f'     <div class="propagation-metric-sub">{", ".join(affected_entities) if affected_entities else "Leaf node (no downstream)"}</div>',
+        '    </div>',
+        '    <div class="propagation-summary-metric-card">',
+        '      <div class="propagation-metric-label">Confirmed vs Potential Shortages</div>',
+        f'     <div class="propagation-metric-value" style="color:{sev_color};">{confirmed_disp}</div>',
+        f'     <div class="propagation-metric-sub">{potential_disp} with operational fallback</div>',
+        '    </div>',
+        '    <div class="propagation-summary-metric-card">',
+        '      <div class="propagation-metric-label">Severed Supply Corridors</div>',
+        f'     <div class="propagation-metric-value" style="color:#F59E0B;">{severed_count} <span style="font-size:0.82rem; font-weight:500; color:#94A3B8;">Routes</span></div>',
+        f'     <div class="propagation-metric-sub">Direct capacity offline: {loss_disp}</div>',
+        '    </div>',
+        '    <div class="propagation-summary-metric-card">',
+        '      <div class="propagation-metric-label">Propagation Trajectory</div>',
+        f'     <div class="propagation-metric-value" style="color:#38BDF8; font-size:1.0rem;">Directed Cascade</div>',
+        f'     <div class="propagation-metric-sub">{failed_entity} &rarr; {" &rarr; ".join(affected_entities[:2]) if affected_entities else "Terminal Sink"}</div>',
+        '    </div>',
+        '  </div>',
+        '</div>',
+    ]
+    return "".join(line.strip() for line in lines if line.strip())
+

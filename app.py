@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Ensure workspace is on sys.path and configure UTF-8 output on Windows
@@ -82,9 +83,12 @@ from agents.decision_explanation_agent import (
 from agents.dashboard_components import (
     build_financial_scenario_from_simulation,
     classify_node_status,
+    create_disruption_propagation_figure,
     create_resilient_network_figure,
     generate_candidate_recovery_options,
+    render_disruption_propagation_summary,
     render_risk_card,
+    render_five_agent_workflow_panel,
     safe_format_capacity,
     safe_format_currency,
     safe_format_lead_time,
@@ -92,7 +96,9 @@ from agents.dashboard_components import (
 )
 
 # Audit Logging & Governance Import
+import json
 from agents.audit_logger import AuditLogger
+from agents.auth_manager import AuthManager, UserRole
 
 
 def sanitize_error_message(err_str: str) -> str:
@@ -178,112 +184,370 @@ def run_streamlit_app() -> None:
         initial_sidebar_state="expanded",
     )
 
+    # Initialize Enterprise Audit and Security Authentication Managers
+    audit_logger = AuditLogger()
+    auth_manager = AuthManager(db_path="data/nexus_auth.db")
+
+    # Session State Initialization for Authentication & RBAC
+    if "nexus_auth_authenticated" not in st.session_state:
+        st.session_state["nexus_auth_authenticated"] = False
+    if "nexus_auth_user" not in st.session_state:
+        st.session_state["nexus_auth_user"] = None
+    if "nexus_auth_login_time" not in st.session_state:
+        st.session_state["nexus_auth_login_time"] = None
+    if "nexus_auth_last_activity" not in st.session_state:
+        st.session_state["nexus_auth_last_activity"] = None
+    if "auth_error" not in st.session_state:
+        st.session_state["auth_error"] = None
+
+    # Inactivity Session Expiration Check (30 minutes = 1800s)
+    SESSION_TIMEOUT_SECONDS = 1800
+    if st.session_state.get("nexus_auth_authenticated"):
+        last_act = st.session_state.get("nexus_auth_last_activity", 0.0)
+        current_now = time.time()
+        if (current_now - last_act) > SESSION_TIMEOUT_SECONDS:
+            active_u = st.session_state.get("nexus_auth_user", {})
+            auth_manager.record_session_expired(active_u.get("username", "UNKNOWN"))
+            st.session_state["nexus_auth_authenticated"] = False
+            st.session_state["nexus_auth_user"] = None
+            st.session_state["nexus_auth_login_time"] = None
+            st.session_state["nexus_auth_last_activity"] = None
+            st.session_state["auth_error"] = "Your session has expired due to 30 minutes of inactivity. Please sign in again."
+            st.rerun()
+        else:
+            # Revalidate live account status from database
+            active_u = st.session_state.get("nexus_auth_user", {})
+            u_name = active_u.get("username", "")
+            if u_name and not auth_manager.is_user_active(u_name):
+                st.session_state["nexus_auth_authenticated"] = False
+                st.session_state["nexus_auth_user"] = None
+                st.session_state["auth_error"] = "Your account has been deactivated by an administrator. Access revoked."
+                st.rerun()
+            else:
+                st.session_state["nexus_auth_last_activity"] = current_now
+
     # Custom CSS for dark-mode styling - Enterprise Control Tower Theme
     st.markdown(
         """
         <style>
-        /* ── Global app background ───────────────────────────────────── */
+        /* ══════════════════════════════════════════════════════════════════
+           NEXUS-AI ENTERPRISE CONTROL TOWER — FUTURISTIC DESIGN SYSTEM
+           ══════════════════════════════════════════════════════════════════ */
+        :root {
+            /* ── Core Backgrounds ── */
+            --nx-bg-space: #030712;
+            --nx-bg-app: #050914;
+            --nx-bg-surface: #0A101F;
+            --nx-bg-card: #0D1629;
+            --nx-bg-card-hover: #13223D;
+            --nx-bg-card-elevated: #162442;
+            --nx-bg-glass: rgba(13, 22, 41, 0.78);
+            --nx-bg-glass-heavy: rgba(8, 14, 28, 0.92);
+
+            /* ── Primary & Secondary Neon Accents ── */
+            --nx-cyan-electric: #00F0FF;
+            --nx-cyan-bright: #06B6D4;
+            --nx-cyan-glow: rgba(0, 240, 255, 0.22);
+            --nx-cyan-subtle: rgba(0, 240, 255, 0.08);
+
+            --nx-blue-electric: #38BDF8;
+            --nx-blue-deep: #2563EB;
+            --nx-blue-glow: rgba(37, 99, 235, 0.24);
+
+            --nx-purple-neon: #8B5CF6;
+            --nx-purple-glow: rgba(139, 92, 246, 0.22);
+            --nx-purple-subtle: rgba(139, 92, 246, 0.08);
+
+            --nx-teal-cyber: #14B8A6;
+            --nx-teal-glow: rgba(20, 184, 166, 0.20);
+
+            --nx-emerald-neon: #10B981;
+            --nx-emerald-glow: rgba(16, 185, 129, 0.22);
+
+            --nx-amber-warning: #F59E0B;
+            --nx-amber-glow: rgba(245, 158, 11, 0.24);
+
+            --nx-rose-disrupt: #EF4444;
+            --nx-rose-glow: rgba(239, 68, 68, 0.32);
+
+            /* ── Borders & Outlines ── */
+            --nx-border-faint: rgba(56, 189, 248, 0.08);
+            --nx-border-subtle: rgba(56, 189, 248, 0.16);
+            --nx-border-medium: rgba(56, 189, 248, 0.28);
+            --nx-border-strong: rgba(0, 240, 255, 0.55);
+            --nx-border-glass: rgba(255, 255, 255, 0.06);
+
+            /* ── High-Contrast Typography ── */
+            --nx-text-primary: #F8FAFC;
+            --nx-text-secondary: #CBD5E1;
+            --nx-text-muted: #94A3B8;
+            --nx-text-dim: #64748B;
+            --nx-text-cyan: #38BDF8;
+            --nx-text-neon: #00F0FF;
+
+            /* ── Futuristic Shadows & Radial Glows ── */
+            --nx-shadow-card: 0 4px 24px -2px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(56, 189, 248, 0.10);
+            --nx-shadow-elevated: 0 12px 32px -4px rgba(0, 0, 0, 0.75), 0 0 20px rgba(0, 240, 255, 0.14);
+            --nx-shadow-cyan-glow: 0 0 24px rgba(0, 240, 255, 0.20);
+            --nx-shadow-purple-glow: 0 0 24px rgba(139, 92, 246, 0.20);
+            --nx-shadow-amber-glow: 0 0 24px rgba(245, 158, 11, 0.22);
+            --nx-shadow-rose-glow: 0 0 28px rgba(239, 68, 68, 0.30);
+
+            /* ── Radii ── */
+            --nx-radius-sm: 6px;
+            --nx-radius-md: 10px;
+            --nx-radius-lg: 14px;
+            --nx-radius-xl: 18px;
+            --nx-radius-full: 9999px;
+
+            /* ── Easing & Transitions ── */
+            --nx-trans-fast: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+            --nx-trans-smooth: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        /* ── Global Space & Deep Ambient Backdrop ──────────────────────── */
         [data-testid="stAppViewContainer"],
         [data-testid="stApp"],
         .main,
         .main .block-container {
-            background-color: #070B14 !important;
+            background-color: var(--nx-bg-space) !important;
+            background-image:
+                radial-gradient(ellipse 900px 520px at 12% 0%, rgba(37, 99, 235, 0.08) 0%, transparent 70%),
+                radial-gradient(ellipse 850px 480px at 88% 8%, rgba(139, 92, 246, 0.07) 0%, transparent 70%),
+                radial-gradient(ellipse 950px 650px at 50% 92%, rgba(0, 240, 255, 0.05) 0%, transparent 75%),
+                linear-gradient(180deg, #050914 0%, #030712 100%) !important;
+            background-attachment: fixed !important;
         }
 
-        /* ── Main content area wrapper ──────────────────────────────── */
+        /* ── Cybernetic Micro-Grid Overlay ────────────────────────────── */
+        [data-testid="stAppViewContainer"]::before {
+            content: "";
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-image: radial-gradient(rgba(56, 189, 248, 0.045) 1px, transparent 1px);
+            background-size: 38px 38px;
+            pointer-events: none;
+            z-index: 0;
+            opacity: 0.85;
+        }
+
+        /* ── Streamlit Top Header Bar (Transparent to Prevent Occlusion) ── */
+        header[data-testid="stHeader"] {
+            background: transparent !important;
+            backdrop-filter: blur(8px) !important;
+            -webkit-backdrop-filter: blur(8px) !important;
+        }
+
+        /* ── Main Content Area Wrapper ───────────────────────────────── */
         section.main > div,
         .block-container {
-            background-color: #070B14 !important;
-            color: #F8FAFC !important;
-            padding-top: 1.2rem !important;
-            padding-bottom: 2.5rem !important;
+            background: transparent !important;
+            color: var(--nx-text-primary) !important;
+            padding-top: 3.85rem !important;
+            padding-bottom: 2.8rem !important;
             max-width: 1440px !important;
+            position: relative;
+            z-index: 1;
         }
 
-        /* ── Scrollbar Styling ──────────────────────────────────────── */
+        /* ── Custom Cybernetic Scrollbars ─────────────────────────────── */
         ::-webkit-scrollbar {
-            width: 6px;
-            height: 6px;
+            width: 7px;
+            height: 7px;
         }
         ::-webkit-scrollbar-track {
-            background: #070B14;
+            background: #040813;
         }
         ::-webkit-scrollbar-thumb {
-            background: #1E293B;
-            border-radius: 4px;
+            background: #17243C;
+            border-radius: var(--nx-radius-full);
+            border: 1px solid rgba(56, 189, 248, 0.15);
+            transition: var(--nx-trans-fast);
         }
         ::-webkit-scrollbar-thumb:hover {
-            background: #06B6D4;
+            background: var(--nx-cyan-bright);
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.5);
         }
 
         /* ── Typography & General Text ───────────────────────────────── */
         html, body, [class*="css"] {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", "Helvetica Neue", Arial, sans-serif !important;
         }
         .stMarkdown p,
         .stMarkdown li,
         .stMarkdown span,
         .stMarkdown label,
         p, span, li, label {
-            color: #CBD5E1 !important;
+            color: var(--nx-text-secondary) !important;
         }
         h1, h2, h3, h4, h5, h6,
         .stMarkdown h1, .stMarkdown h2, .stMarkdown h3,
         .stMarkdown h4, .stMarkdown h5, .stMarkdown h6 {
-            color: #F8FAFC !important;
-            letter-spacing: -0.02em !important;
+            color: var(--nx-text-primary) !important;
+            letter-spacing: -0.025em !important;
+            font-weight: 700 !important;
         }
 
-        /* ── Top Navigation Segmented Control ───────────────────────── */
-        div[data-testid="stRadio"] > div[role="radiogroup"] {
+        /* ── Sidebar Navigation Dock (Full-Width, One Option Per Line) ─ */
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"],
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:first-of-type > div[role="radiogroup"],
+        div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] {
             display: flex !important;
-            flex-direction: row !important;
-            flex-wrap: wrap !important;
-            gap: 8px !important;
-            background-color: #0D1527 !important;
-            padding: 6px 8px !important;
-            border-radius: 12px !important;
-            border: 1px solid #1E293B !important;
-            margin-bottom: 1.2rem !important;
+            flex-direction: column !important;
+            gap: 4px !important;
+            width: 100% !important;
+            background: rgba(10, 16, 32, 0.65) !important;
+            backdrop-filter: blur(12px) !important;
+            -webkit-backdrop-filter: blur(12px) !important;
+            padding: 5px !important;
+            border-radius: var(--nx-radius-md) !important;
+            border: 1px solid var(--nx-border-subtle) !important;
+            margin-bottom: 0.6rem !important;
+            box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3) !important;
         }
-        div[data-testid="stRadio"] > div[role="radiogroup"] > label {
-            background-color: #151F32 !important;
-            border: 1px solid #1E293B !important;
-            border-radius: 8px !important;
-            padding: 8px 16px !important;
+
+        /* Each navigation option occupies full available sidebar width */
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] > label,
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:first-of-type > div[role="radiogroup"] > label,
+        div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] > label {
+            width: 100% !important;
+            flex: 1 1 100% !important;
+            box-sizing: border-box !important;
+            background: rgba(15, 23, 42, 0.55) !important;
+            border: 1px solid rgba(30, 41, 59, 0.70) !important;
+            border-radius: 6px !important;
+            padding: 7px 11px !important;
             margin: 0 !important;
             cursor: pointer !important;
-            transition: all 0.15s ease !important;
+            transition: all 0.15s ease-in-out !important;
             font-weight: 600 !important;
-            font-size: 0.84rem !important;
-            color: #CBD5E1 !important;
+            font-size: 0.81rem !important;
+            color: var(--nx-text-secondary) !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            text-align: left !important;
         }
-        div[data-testid="stRadio"] > div[role="radiogroup"] > label:hover {
-            border-color: #06B6D4 !important;
-            color: #F8FAFC !important;
-            background-color: #1E293B !important;
-            transform: translateY(-1px) !important;
+
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] > label:hover,
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:first-of-type > div[role="radiogroup"] > label:hover,
+        div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] > label:hover {
+            border-color: var(--nx-cyan-bright) !important;
+            color: #FFFFFF !important;
+            background: rgba(22, 38, 70, 0.85) !important;
+            box-shadow: 0 0 10px rgba(6, 182, 212, 0.20) !important;
+            transform: translateX(2px) !important;
         }
-        div[data-testid="stRadio"] > div[role="radiogroup"] > label[data-checked="true"],
-        div[data-testid="stRadio"] > div[role="radiogroup"] > label:has(input:checked) {
-            background: linear-gradient(135deg, rgba(6,182,212,0.25) 0%, rgba(20,184,166,0.15) 100%) !important;
-            border: 1px solid #06B6D4 !important;
-            color: #38BDF8 !important;
+
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] > label[data-checked="true"],
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] > label:has(input:checked),
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:first-of-type > div[role="radiogroup"] > label[data-checked="true"],
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:first-of-type > div[role="radiogroup"] > label:has(input:checked),
+        div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] > label[data-checked="true"],
+        div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] > label:has(input:checked) {
+            background: linear-gradient(90deg, rgba(6, 182, 212, 0.25) 0%, rgba(37, 99, 235, 0.18) 100%) !important;
+            border: 1px solid var(--nx-cyan-bright) !important;
+            border-left: 4px solid var(--nx-cyan-electric) !important;
+            color: #FFFFFF !important;
             font-weight: 700 !important;
-            box-shadow: 0 2px 10px rgba(6, 182, 212, 0.25) !important;
+            box-shadow: 0 2px 10px rgba(6, 182, 212, 0.25), inset 0 0 8px rgba(6, 182, 212, 0.10) !important;
         }
-        div[data-testid="stRadio"] > div[role="radiogroup"] input[type="radio"] {
-            display: none !important;
-        }
-        div[data-testid="stRadio"] > div[role="radiogroup"] > label > div:first-child {
+
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] input[type="radio"],
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:first-of-type > div[role="radiogroup"] input[type="radio"],
+        div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] input[type="radio"] {
             display: none !important;
         }
 
-        /* ── Sidebar ────────────────────────────────────────────────── */
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] > label > div:first-child,
+        [data-testid="stSidebar"] div[data-testid="stRadio"]:first-of-type > div[role="radiogroup"] > label > div:first-child,
+        div[data-testid="stRadio"]:has(div[aria-label="Navigation"]) > div[role="radiogroup"] > label > div:first-child {
+            display: none !important;
+        }
+
+        /* ── Map Dedicated Animation Control Bar ──────────────────────── */
+        .map-control-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            background: linear-gradient(180deg, rgba(15, 23, 42, 0.90) 0%, rgba(10, 16, 32, 0.95) 100%);
+            border: 1px solid var(--nx-border-subtle);
+            border-radius: var(--nx-radius-md);
+            padding: 8px 14px;
+            margin-bottom: 10px;
+            box-shadow: var(--nx-shadow-card);
+        }
+
+        /* ── Five-Agent Grid Equal Dimensions & Zero Clipping ───────── */
+        .workflow-pipeline-grid {
+            display: grid !important;
+            grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+            gap: 12px !important;
+            position: relative !important;
+            width: 100% !important;
+            align-items: stretch !important;
+        }
+        @media (max-width: 1100px) {
+            .workflow-pipeline-grid {
+                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+            }
+        }
+        @media (max-width: 720px) {
+            .workflow-pipeline-grid {
+                grid-template-columns: 1fr !important;
+            }
+        }
+
+        .agent-workflow-card {
+            background: var(--nx-bg-card);
+            border: 1px solid var(--nx-border-subtle);
+            border-radius: var(--nx-radius-md);
+            padding: 14px 14px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            min-height: 185px;
+            height: 100%;
+            min-width: 0;
+            width: 100%;
+            box-sizing: border-box;
+            transition: var(--nx-trans-smooth);
+            position: relative;
+            backdrop-filter: blur(8px);
+        }
+        .agent-card-name {
+            font-size: 0.85rem;
+            font-weight: 700;
+            margin-top: 4px;
+            margin-bottom: 3px;
+            line-height: 1.25;
+            overflow-wrap: break-word;
+            word-break: normal;
+            white-space: normal;
+        }
+        .agent-card-role {
+            font-size: 0.72rem;
+            color: var(--nx-text-muted);
+            line-height: 1.35;
+            margin-bottom: 8px;
+            overflow-wrap: break-word;
+            white-space: normal;
+        }
+
+        /* ── Sidebar (Glassmorphic Command Console) ─────────────────── */
         [data-testid="stSidebar"],
         [data-testid="stSidebar"] > div:first-child {
-            background-color: #0D1527 !important;
-            border-right: 1px solid #1E293B !important;
+            background-color: var(--nx-bg-surface) !important;
+            background-image: linear-gradient(180deg, rgba(13, 22, 41, 0.95) 0%, rgba(5, 9, 20, 0.98) 100%) !important;
+            border-right: 1px solid var(--nx-border-subtle) !important;
+            backdrop-filter: blur(16px) !important;
+            -webkit-backdrop-filter: blur(16px) !important;
+            box-shadow: 4px 0 24px rgba(0, 0, 0, 0.45) !important;
         }
         [data-testid="stSidebar"] .stMarkdown,
         [data-testid="stSidebar"] label,
@@ -293,12 +557,12 @@ def run_streamlit_app() -> None:
         [data-testid="stSidebar"] .stNumberInput label,
         [data-testid="stSidebar"] p,
         [data-testid="stSidebar"] span {
-            color: #94A3B8 !important;
+            color: var(--nx-text-muted) !important;
         }
         [data-testid="stSidebar"] h1,
         [data-testid="stSidebar"] h2,
         [data-testid="stSidebar"] h3 {
-            color: #F8FAFC !important;
+            color: var(--nx-text-primary) !important;
         }
         .sidebar-section-badge {
             display: inline-flex;
@@ -308,20 +572,57 @@ def run_streamlit_app() -> None:
             font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.08em;
-            color: #38BDF8;
+            color: var(--nx-text-cyan);
             margin-bottom: 8px;
+        }
+
+        /* ── Authentication & RBAC Design Elements ───────────────────── */
+        .user-profile-badge {
+            background: linear-gradient(135deg, rgba(15, 23, 42, 0.85) 0%, rgba(10, 16, 32, 0.95) 100%);
+            border: 1px solid var(--nx-border-subtle);
+            border-radius: var(--nx-radius-md);
+            padding: 10px 12px;
+            margin-bottom: 10px;
+            box-shadow: var(--nx-shadow-card);
+        }
+        .role-pill {
+            display: inline-block;
+            font-size: 0.68rem;
+            font-weight: 800;
+            padding: 2px 8px;
+            border-radius: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-family: monospace;
+        }
+        .role-admin {
+            color: #C084FC !important;
+            background: rgba(139, 92, 246, 0.16) !important;
+            border: 1px solid rgba(139, 92, 246, 0.35) !important;
+        }
+        .role-reviewer {
+            color: #38BDF8 !important;
+            background: rgba(6, 182, 212, 0.16) !important;
+            border: 1px solid rgba(6, 182, 212, 0.35) !important;
+        }
+        .role-viewer {
+            color: #34D399 !important;
+            background: rgba(16, 185, 129, 0.16) !important;
+            border: 1px solid rgba(16, 185, 129, 0.35) !important;
         }
 
         /* ── Enterprise Masthead Header ──────────────────────────────── */
         .control-tower-header {
-            background: linear-gradient(135deg, #101B30 0%, #0B1323 100%);
-            border: 1px solid #1E293B;
-            border-radius: 12px;
+            background: linear-gradient(135deg, rgba(16, 28, 54, 0.92) 0%, rgba(9, 16, 32, 0.95) 100%);
+            border: 1px solid var(--nx-border-medium);
+            border-radius: var(--nx-radius-lg);
             padding: 18px 24px;
-            margin-bottom: 1.2rem;
-            box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.5);
+            margin-bottom: 1.3rem;
+            box-shadow: var(--nx-shadow-card);
             position: relative;
             overflow: hidden;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
         }
         .control-tower-header::before {
             content: "";
@@ -330,20 +631,23 @@ def run_streamlit_app() -> None:
             left: 0;
             right: 0;
             height: 3px;
-            background: linear-gradient(90deg, #06B6D4 0%, #14B8A6 50%, #38BDF8 100%);
+            background: linear-gradient(90deg, #00F0FF 0%, #38BDF8 30%, #3B82F6 60%, #8B5CF6 100%);
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.6);
         }
         .masthead-title {
-            font-size: 2.1rem !important;
+            font-size: 2.15rem !important;
             font-weight: 800 !important;
             letter-spacing: -0.03em !important;
-            color: #FFFFFF !important;
+            background: linear-gradient(135deg, #FFFFFF 0%, #F1F5F9 50%, #38BDF8 100%) !important;
+            -webkit-background-clip: text !important;
+            -webkit-text-fill-color: transparent !important;
             margin: 0 !important;
             line-height: 1.15 !important;
         }
         .masthead-tagline {
             font-size: 0.92rem;
             font-weight: 500;
-            color: #38BDF8;
+            color: var(--nx-text-cyan);
             letter-spacing: 0.04em;
             margin-top: 4px;
             margin-bottom: 8px;
@@ -355,20 +659,25 @@ def run_streamlit_app() -> None:
             gap: 12px;
             font-size: 0.84rem;
         }
+
+        /* ── Telemetry Pills & Live Badges ────────────────────────────── */
         .telemetry-pill {
             display: inline-flex;
             align-items: center;
-            gap: 6px;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-weight: 600;
+            gap: 7px;
+            padding: 4px 14px;
+            border-radius: var(--nx-radius-full);
+            font-weight: 700;
             font-size: 0.78rem;
             letter-spacing: 0.04em;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+            transition: var(--nx-trans-smooth);
         }
         .telemetry-live {
-            background: rgba(16, 185, 129, 0.15);
+            background: rgba(16, 185, 129, 0.16);
             color: #34D399;
-            border: 1px solid rgba(16, 185, 129, 0.45);
+            border: 1px solid rgba(16, 185, 129, 0.50);
+            box-shadow: 0 0 14px rgba(16, 185, 129, 0.20);
         }
         .telemetry-pulse {
             display: inline-block;
@@ -376,57 +685,98 @@ def run_streamlit_app() -> None:
             height: 7px;
             border-radius: 50%;
             background-color: #34D399;
-            box-shadow: 0 0 8px #34D399;
-            animation: pulse-dot 2s infinite;
+            box-shadow: 0 0 10px #34D399;
+            animation: pulse-dot 1.8s infinite;
         }
         @keyframes pulse-dot {
-            0% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.35; transform: scale(0.85); }
-            100% { opacity: 1; transform: scale(1); }
+            0% { opacity: 1; transform: scale(1); box-shadow: 0 0 10px #34D399; }
+            50% { opacity: 0.35; transform: scale(0.85); box-shadow: 0 0 4px #34D399; }
+            100% { opacity: 1; transform: scale(1); box-shadow: 0 0 10px #34D399; }
         }
         .telemetry-standby {
-            background: rgba(6, 182, 212, 0.12);
+            background: rgba(6, 182, 212, 0.14);
             color: #38BDF8;
-            border: 1px solid rgba(6, 182, 212, 0.4);
+            border: 1px solid rgba(6, 182, 212, 0.45);
         }
         .telemetry-local {
             background: rgba(148, 163, 184, 0.12);
-            color: #CBD5E1;
-            border: 1px solid rgba(148, 163, 184, 0.3);
+            color: #E2E8F0;
+            border: 1px solid rgba(148, 163, 184, 0.30);
         }
         .telemetry-fallback {
-            background: rgba(245, 158, 11, 0.15);
+            background: rgba(245, 158, 11, 0.16);
             color: #FBBF24;
-            border: 1px solid rgba(245, 158, 11, 0.45);
+            border: 1px solid rgba(245, 158, 11, 0.50);
+            box-shadow: 0 0 14px rgba(245, 158, 11, 0.20);
         }
 
-        /* ── KPI Cards ──────────────────────────────────────────────── */
-        .kpi-card {
-            background: #151F32;
-            border: 1px solid #1E293B;
-            border-radius: 10px;
-            padding: 14px 16px;
-            height: 100%;
-            min-height: 100px;
-            box-sizing: border-box;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-            position: relative;
+        /* ── Equal-width Four-Column KPI Grid ──────────────────────── */
+        .kpi-grid {
+            display: grid !important;
+            grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+            gap: 14px !important;
+            width: 100% !important;
+            align-items: stretch !important;
+            margin-bottom: 14px !important;
+            box-sizing: border-box !important;
         }
+
+        @media (max-width: 1100px) {
+            .kpi-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .kpi-grid {
+                grid-template-columns: 1fr !important;
+            }
+        }
+
+        /* ── Executive KPI Cards (Consistent Dimensions & Full Text) ─── */
+        .kpi-grid .kpi-card,
+        .kpi-card {
+            background: linear-gradient(180deg, var(--nx-bg-card) 0%, rgba(10, 17, 34, 0.95) 100%);
+            border: 1px solid var(--nx-border-subtle);
+            border-radius: var(--nx-radius-md);
+            padding: 16px 18px;
+            height: 100% !important;
+            min-height: 145px !important;
+            width: 100% !important;
+            min-width: 0 !important;
+            box-sizing: border-box !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: space-between !important;
+            transition: var(--nx-trans-smooth);
+            box-shadow: var(--nx-shadow-card);
+            position: relative;
+            overflow: visible;
+            backdrop-filter: blur(8px);
+        }
+        .kpi-grid .kpi-card::after,
+        .kpi-card::after {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(135deg, rgba(255, 255, 255, 0.03) 0%, transparent 100%);
+            pointer-events: none;
+        }
+        .kpi-grid .kpi-card:hover,
         .kpi-card:hover {
             transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
-            border-color: #334155;
+            box-shadow: var(--nx-shadow-elevated);
+            border-color: var(--nx-border-medium);
         }
-        .kpi-card-glow-cyan   { border-top: 3px solid #06B6D4; }
-        .kpi-card-glow-teal   { border-top: 3px solid #14B8A6; }
-        .kpi-card-glow-sky    { border-top: 3px solid #38BDF8; }
-        .kpi-card-glow-amber  { border-top: 3px solid #F59E0B; }
-        .kpi-card-glow-rose   { border-top: 3px solid #F43F5E; }
-        .kpi-card-glow-emerald{ border-top: 3px solid #10B981; }
+        .kpi-card-glow-cyan   { border-top: 3px solid var(--nx-cyan-bright); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5), inset 0 2px 8px rgba(0, 240, 255, 0.10); }
+        .kpi-card-glow-teal   { border-top: 3px solid var(--nx-teal-cyber); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5), inset 0 2px 8px rgba(20, 184, 166, 0.10); }
+        .kpi-card-glow-sky    { border-top: 3px solid var(--nx-blue-electric); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5), inset 0 2px 8px rgba(56, 189, 248, 0.10); }
+        .kpi-card-glow-amber  { border-top: 3px solid var(--nx-amber-warning); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5), inset 0 2px 8px rgba(245, 158, 11, 0.10); }
+        .kpi-card-glow-rose   { border-top: 3px solid #F43F5E; box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5), inset 0 2px 8px rgba(244, 63, 94, 0.12); }
+        .kpi-card-glow-emerald{ border-top: 3px solid var(--nx-emerald-neon); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5), inset 0 2px 8px rgba(16, 185, 129, 0.10); }
 
         .kpi-card-header {
             display: flex;
@@ -437,63 +787,72 @@ def run_streamlit_app() -> None:
         .kpi-card-label {
             font-size: 0.72rem;
             font-weight: 700;
-            color: #94A3B8;
+            color: var(--nx-text-muted);
             text-transform: uppercase;
-            letter-spacing: 0.05em;
+            letter-spacing: 0.06em;
+            line-height: 1.2;
         }
         .kpi-card-icon {
-            font-size: 1.05rem;
+            font-size: 1.10rem;
             line-height: 1;
+            filter: drop-shadow(0 0 6px rgba(0, 240, 255, 0.35));
         }
         .kpi-card-value {
-            font-size: 1.45rem;
+            font-size: 1.50rem;
             font-weight: 800;
-            color: #F8FAFC;
-            letter-spacing: -0.02em;
-            line-height: 1.15;
+            color: var(--nx-text-primary);
+            letter-spacing: -0.025em;
+            line-height: 1.2;
+            margin-top: 4px;
+            margin-bottom: 6px;
             font-feature-settings: "tnum";
+            text-shadow: 0 0 16px rgba(255, 255, 255, 0.15);
         }
         .kpi-card-subtitle {
-            font-size: 0.70rem;
-            color: #64748B;
-            margin-top: 4px;
-            font-weight: 500;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            font-size: 0.74rem;
+            color: var(--nx-text-secondary);
+            line-height: 1.4;
+            font-weight: 400;
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            word-break: normal !important;
+            margin-top: auto;
         }
 
-        /* ── Modern Risk Badges (Pills) ─────────────────────────────── */
+        /* ── Risk & Severity Badges (Pills) ──────────────────────────── */
         .badge-critical {
-            background-color: rgba(244, 63, 94, 0.18) !important;
-            color: #FB7185 !important;
-            border: 1px solid rgba(244, 63, 94, 0.45) !important;
+            background-color: rgba(239, 68, 68, 0.18) !important;
+            color: #F87171 !important;
+            border: 1px solid rgba(239, 68, 68, 0.55) !important;
             padding: 3px 10px !important;
-            border-radius: 16px !important;
+            border-radius: var(--nx-radius-full) !important;
             font-weight: 700 !important;
             font-size: 0.78rem !important;
             letter-spacing: 0.03em !important;
             display: inline-flex !important;
             align-items: center !important;
+            box-shadow: 0 0 10px rgba(239, 68, 68, 0.22) !important;
         }
         .badge-high {
             background-color: rgba(245, 158, 11, 0.18) !important;
             color: #FBBF24 !important;
-            border: 1px solid rgba(245, 158, 11, 0.45) !important;
+            border: 1px solid rgba(245, 158, 11, 0.50) !important;
             padding: 3px 10px !important;
-            border-radius: 16px !important;
+            border-radius: var(--nx-radius-full) !important;
             font-weight: 700 !important;
             font-size: 0.78rem !important;
             letter-spacing: 0.03em !important;
             display: inline-flex !important;
             align-items: center !important;
+            box-shadow: 0 0 10px rgba(245, 158, 11, 0.20) !important;
         }
         .badge-medium {
             background-color: rgba(234, 179, 8, 0.18) !important;
             color: #FDE047 !important;
-            border: 1px solid rgba(234, 179, 8, 0.45) !important;
+            border: 1px solid rgba(234, 179, 8, 0.50) !important;
             padding: 3px 10px !important;
-            border-radius: 16px !important;
+            border-radius: var(--nx-radius-full) !important;
             font-weight: 700 !important;
             font-size: 0.78rem !important;
             letter-spacing: 0.03em !important;
@@ -503,9 +862,9 @@ def run_streamlit_app() -> None:
         .badge-low {
             background-color: rgba(16, 185, 129, 0.18) !important;
             color: #34D399 !important;
-            border: 1px solid rgba(16, 185, 129, 0.45) !important;
+            border: 1px solid rgba(16, 185, 129, 0.50) !important;
             padding: 3px 10px !important;
-            border-radius: 16px !important;
+            border-radius: var(--nx-radius-full) !important;
             font-weight: 700 !important;
             font-size: 0.78rem !important;
             letter-spacing: 0.03em !important;
@@ -513,40 +872,42 @@ def run_streamlit_app() -> None:
             align-items: center !important;
         }
 
-        /* ── Form Controls & Inputs ─────────────────────────────────── */
+        /* ── Futuristic Form Controls & Inputs ───────────────────────── */
         [data-testid="stSelectbox"] > div > div,
         [data-testid="stNumberInput"] input,
         [data-testid="stTextInput"] input,
         [data-testid="stTextArea"] textarea {
-            background-color: #151F32 !important;
-            color: #F8FAFC !important;
-            border: 1px solid #334155 !important;
-            border-radius: 8px !important;
-            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2) !important;
+            background-color: rgba(15, 24, 45, 0.85) !important;
+            color: var(--nx-text-primary) !important;
+            border: 1px solid var(--nx-border-medium) !important;
+            border-radius: var(--nx-radius-md) !important;
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3) !important;
+            transition: var(--nx-trans-smooth) !important;
         }
         [data-testid="stSelectbox"] > div > div:focus-within,
         [data-testid="stNumberInput"] input:focus,
         [data-testid="stTextInput"] input:focus,
         [data-testid="stTextArea"] textarea:focus {
-            border-color: #06B6D4 !important;
-            box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.25) !important;
+            border-color: var(--nx-cyan-bright) !important;
+            box-shadow: 0 0 0 2px var(--nx-cyan-glow), inset 0 2px 4px rgba(0, 0, 0, 0.3) !important;
         }
 
         /* ── Custom Decision Action Buttons ────────────────────────── */
         div[data-testid="stButton"] > button:has(p:contains("Reject")),
         button[key*="reject"] {
-            background: rgba(239, 68, 68, 0.12) !important;
-            border: 1px solid rgba(239, 68, 68, 0.5) !important;
+            background: rgba(239, 68, 68, 0.14) !important;
+            border: 1px solid rgba(239, 68, 68, 0.55) !important;
             color: #F87171 !important;
             font-weight: 700 !important;
-            transition: all 0.2s ease !important;
+            transition: var(--nx-trans-smooth) !important;
+            border-radius: var(--nx-radius-md) !important;
         }
         div[data-testid="stButton"] > button:has(p:contains("Reject")):hover,
         button[key*="reject"]:hover {
-            background: rgba(239, 68, 68, 0.25) !important;
+            background: rgba(239, 68, 68, 0.28) !important;
             border-color: #EF4444 !important;
             color: #FFFFFF !important;
-            box-shadow: 0 4px 14px rgba(239, 68, 68, 0.4) !important;
+            box-shadow: 0 4px 18px var(--nx-rose-glow) !important;
             transform: translateY(-1px) !important;
         }
         div[data-testid="stButton"] > button:has(p:contains("Approve")),
@@ -555,83 +916,91 @@ def run_streamlit_app() -> None:
             color: #FFFFFF !important;
             border: none !important;
             font-weight: 700 !important;
-            box-shadow: 0 4px 14px rgba(16, 185, 129, 0.35) !important;
-            transition: all 0.2s ease !important;
+            border-radius: var(--nx-radius-md) !important;
+            box-shadow: 0 4px 16px rgba(16, 185, 129, 0.40) !important;
+            transition: var(--nx-trans-smooth) !important;
         }
         div[data-testid="stButton"] > button:has(p:contains("Approve")):hover,
         button[key*="approve"]:hover {
             background: linear-gradient(135deg, #10B981 0%, #14B8A6 100%) !important;
-            box-shadow: 0 6px 18px rgba(16, 185, 129, 0.5) !important;
+            box-shadow: 0 6px 22px rgba(16, 185, 129, 0.55) !important;
             transform: translateY(-1px) !important;
         }
 
-        /* ── Buttons ────────────────────────────────────────────────── */
+        /* ── Primary & Secondary Cyber Buttons ───────────────────────── */
         [data-testid="stBaseButton-primary"],
         button[kind="primary"] {
-            background: linear-gradient(135deg, #06B6D4 0%, #0D9488 100%) !important;
+            background: linear-gradient(135deg, #0284C7 0%, #2563EB 100%) !important;
             color: #FFFFFF !important;
             border: none !important;
-            border-radius: 8px !important;
+            border-radius: var(--nx-radius-md) !important;
             font-weight: 700 !important;
-            padding: 0.5rem 1.25rem !important;
-            box-shadow: 0 4px 14px rgba(6, 182, 212, 0.35) !important;
-            transition: all 0.2s ease !important;
+            padding: 0.52rem 1.3rem !important;
+            box-shadow: 0 4px 16px rgba(2, 132, 199, 0.40) !important;
+            transition: var(--nx-trans-smooth) !important;
         }
         [data-testid="stBaseButton-primary"]:hover,
         button[kind="primary"]:hover {
-            background: linear-gradient(135deg, #0891B2 0%, #0F766E 100%) !important;
-            box-shadow: 0 6px 18px rgba(6, 182, 212, 0.5) !important;
+            background: linear-gradient(135deg, #06B6D4 0%, #1D4ED8 100%) !important;
+            box-shadow: 0 6px 22px rgba(6, 182, 212, 0.50) !important;
             transform: translateY(-1px) !important;
         }
         [data-testid="stBaseButton-secondary"],
         button[kind="secondary"] {
-            background-color: #1E293B !important;
-            color: #E2E8F0 !important;
-            border: 1px solid #334155 !important;
-            border-radius: 8px !important;
+            background: rgba(18, 29, 53, 0.75) !important;
+            color: var(--nx-text-primary) !important;
+            border: 1px solid var(--nx-border-medium) !important;
+            border-radius: var(--nx-radius-md) !important;
             font-weight: 600 !important;
-            transition: all 0.2s ease !important;
+            transition: var(--nx-trans-smooth) !important;
+            backdrop-filter: blur(8px) !important;
         }
         [data-testid="stBaseButton-secondary"]:hover,
         button[kind="secondary"]:hover {
-            background-color: #273549 !important;
-            border-color: #06B6D4 !important;
-            color: #38BDF8 !important;
+            background: rgba(26, 42, 77, 0.90) !important;
+            border-color: var(--nx-cyan-bright) !important;
+            color: var(--nx-cyan-electric) !important;
+            box-shadow: 0 0 14px var(--nx-cyan-subtle) !important;
+            transform: translateY(-1px) !important;
         }
         [data-testid="stDownloadButton"] button {
-            background: linear-gradient(135deg, #06B6D4 0%, #0D9488 100%) !important;
+            background: linear-gradient(135deg, #0284C7 0%, #2563EB 100%) !important;
             color: #FFFFFF !important;
             border: none !important;
-            border-radius: 8px !important;
+            border-radius: var(--nx-radius-md) !important;
             font-weight: 700 !important;
-            box-shadow: 0 4px 14px rgba(6, 182, 212, 0.35) !important;
+            box-shadow: 0 4px 16px rgba(2, 132, 199, 0.40) !important;
         }
 
-        /* ── Dataframes & Tables ────────────────────────────────────── */
+        /* ── Dataframes & Tables (Dark Glass Theme) ───────────────────── */
         [data-testid="stDataFrame"] {
-            border: 1px solid #1E293B !important;
-            border-radius: 8px !important;
+            border: 1px solid var(--nx-border-subtle) !important;
+            border-radius: var(--nx-radius-md) !important;
             overflow: hidden !important;
+            background: var(--nx-bg-card) !important;
+            box-shadow: var(--nx-shadow-card) !important;
         }
         [data-testid="stDataFrame"] [data-testid="stElementToolbar"],
         [data-testid="stElementToolbar"] {
-            background-color: #151F32 !important;
-            border: 1px solid #1E293B !important;
-            border-radius: 6px !important;
+            background-color: var(--nx-bg-surface) !important;
+            border: 1px solid var(--nx-border-subtle) !important;
+            border-radius: var(--nx-radius-sm) !important;
         }
 
         /* ── Section Dividers & Cards ───────────────────────────────── */
         hr {
-            border-color: #1E293B !important;
-            margin: 1.2rem 0 !important;
+            border-color: var(--nx-border-faint) !important;
+            margin: 1.3rem 0 !important;
         }
         .user-guide-box {
-            background: linear-gradient(135deg, #101B30 0%, #0D1629 100%);
-            border: 1px solid #1E293B;
-            border-left: 4px solid #06B6D4;
-            border-radius: 8px;
-            padding: 12px 16px;
+            background: linear-gradient(135deg, rgba(16, 27, 51, 0.85) 0%, rgba(10, 18, 36, 0.90) 100%);
+            border: 1px solid var(--nx-border-subtle);
+            border-left: 4px solid var(--nx-cyan-bright);
+            border-radius: var(--nx-radius-md);
+            padding: 13px 18px;
             margin-bottom: 1.2rem;
+            box-shadow: var(--nx-shadow-card);
+            backdrop-filter: blur(8px);
         }
         .section-header-banner {
             display: flex;
@@ -639,28 +1008,527 @@ def run_streamlit_app() -> None:
             align-items: center;
             flex-wrap: wrap;
             gap: 8px;
-            margin-bottom: 0.8rem;
+            margin-bottom: 0.85rem;
         }
         .section-header-title {
-            font-size: 1.35rem;
+            font-size: 1.38rem;
             font-weight: 800;
-            color: #F8FAFC;
-            letter-spacing: -0.02em;
+            color: var(--nx-text-primary);
+            letter-spacing: -0.025em;
             display: flex;
             align-items: center;
             gap: 8px;
         }
         .section-header-desc {
-            font-size: 0.82rem;
+            font-size: 0.83rem;
+            color: var(--nx-text-muted);
+            margin-bottom: 1.1rem;
+        }
+
+        /* ── Plotly Map Container & Controls ────────────────────────── */
+        [data-testid="stPlotlyChart"] {
+            border: 1px solid var(--nx-border-subtle) !important;
+            border-radius: var(--nx-radius-lg) !important;
+            overflow: hidden !important;
+            box-shadow: var(--nx-shadow-card) !important;
+            background: #080F1E !important;
+        }
+        .plot-container.plotly {
+            border-radius: var(--nx-radius-lg) !important;
+        }
+
+        /* ── Streamlit Toggle Polish & Spacing ──────────────────────── */
+        [data-testid="stToggle"] {
+            display: flex !important;
+            align-items: center !important;
+            justify-content: flex-end !important;
+        }
+        [data-testid="stToggle"] label {
+            margin-bottom: 0 !important;
+        }
+        [data-testid="stToggle"] label p {
+            font-size: 0.82rem !important;
+            font-weight: 600 !important;
+            color: var(--nx-text-primary) !important;
+            white-space: nowrap !important;
+        }
+        [data-testid="stToggle"] span[data-baseweb="toggle"] {
+            background-color: #17243C !important;
+            border: 1px solid var(--nx-border-medium) !important;
+        }
+        [data-testid="stToggle"] input:checked + div,
+        [data-testid="stToggle"] [aria-checked="true"] {
+            background-color: var(--nx-cyan-bright) !important;
+            box-shadow: 0 0 10px rgba(6, 182, 212, 0.45) !important;
+        }
+
+        /* ── Plotly Updatemenu Buttons (Play / Pause / Replay) ────────── */
+        .js-plotly-plot .updatemenu-container .updatemenu-button rect,
+        .js-plotly-plot rect.updatemenu-item-rect,
+        .js-plotly-plot rect.updatemenu-item-rect-active,
+        .js-plotly-plot .updatemenu-button-active rect {
+            fill: #151F32 !important;
+            stroke: #334155 !important;
+            stroke-width: 1.2px !important;
+            rx: 6px !important;
+            ry: 6px !important;
+            cursor: pointer !important;
+            transition: var(--nx-trans-smooth) !important;
+        }
+        .js-plotly-plot .updatemenu-container .updatemenu-button:hover rect,
+        .js-plotly-plot rect.updatemenu-item-rect:hover,
+        .js-plotly-plot rect.updatemenu-item-rect-active:hover {
+            fill: #1D2D49 !important;
+            stroke: var(--nx-cyan-bright) !important;
+            filter: drop-shadow(0 0 6px rgba(0, 240, 255, 0.40)) !important;
+        }
+        .js-plotly-plot .updatemenu-container .updatemenu-button text,
+        .js-plotly-plot text.updatemenu-item-text,
+        .js-plotly-plot text.updatemenu-item-text-active,
+        .js-plotly-plot .updatemenu-button-active text {
+            fill: #F8FAFC !important;
+            font-weight: 700 !important;
+            font-size: 11px !important;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+            cursor: pointer !important;
+            user-select: none !important;
+        }
+        .js-plotly-plot .updatemenu-container .updatemenu-button:hover text,
+        .js-plotly-plot text.updatemenu-item-text:hover,
+        .js-plotly-plot text.updatemenu-item-text-active:hover {
+            fill: var(--nx-cyan-electric) !important;
+        }
+
+        /* ── Feature 2: Five-Agent Workflow Orchestration Panel ─────── */
+        .agent-orchestration-panel {
+            background: linear-gradient(180deg, rgba(15, 24, 45, 0.95) 0%, rgba(10, 16, 32, 0.98) 100%);
+            border: 1px solid var(--nx-border-medium);
+            border-radius: var(--nx-radius-lg);
+            padding: 14px 18px;
+            margin-bottom: 1.3rem;
+            box-shadow: var(--nx-shadow-card);
+            position: relative;
+            overflow: hidden;
+            backdrop-filter: blur(12px);
+        }
+        .agent-orchestration-panel::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, #3B82F6 0%, #06B6D4 25%, #F59E0B 50%, #10B981 75%, #8B5CF6 100%);
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.4);
+        }
+        .agent-panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }
+        .workflow-pipeline-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 10px;
+            position: relative;
+        }
+        @media (max-width: 1024px) {
+            .workflow-pipeline-grid {
+                grid-template-columns: repeat(2, 1fr) !important;
+            }
+        }
+        @media (max-width: 640px) {
+            .workflow-pipeline-grid {
+                grid-template-columns: 1fr !important;
+            }
+        }
+
+        .agent-workflow-card {
+            background: var(--nx-bg-card);
+            border: 1px solid var(--nx-border-subtle);
+            border-radius: var(--nx-radius-md);
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            min-height: 120px;
+            box-sizing: border-box;
+            transition: var(--nx-trans-smooth);
+            position: relative;
+            backdrop-filter: blur(6px);
+        }
+        .agent-workflow-card:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--nx-shadow-elevated);
+            border-color: var(--nx-border-medium);
+        }
+        .agent-card-waiting {
+            background: rgba(11, 18, 35, 0.70) !important;
+            border: 1px solid var(--nx-border-faint) !important;
+            opacity: 0.65;
+        }
+        .agent-card-processing {
+            background: linear-gradient(135deg, #13223E 0%, #1A2F55 100%) !important;
+            transform: translateY(-2px);
+            animation: agent-card-pulse 1.4s ease-in-out infinite alternate;
+        }
+        @keyframes agent-card-pulse {
+            0% { box-shadow: 0 0 10px rgba(6, 182, 212, 0.20); }
+            100% { box-shadow: 0 0 24px rgba(6, 182, 212, 0.58), inset 0 0 12px rgba(6, 182, 212, 0.15); }
+        }
+        .agent-card-completed {
+            background: var(--nx-bg-card) !important;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+        }
+        .agent-card-error {
+            background: rgba(239, 68, 68, 0.10) !important;
+            border: 1px solid #EF4444 !important;
+            box-shadow: 0 0 16px var(--nx-rose-glow);
+        }
+
+        .agent-accent-blue   { border-top: 3px solid #3B82F6 !important; }
+        .agent-accent-cyan   { border-top: 3px solid #06B6D4 !important; }
+        .agent-accent-amber  { border-top: 3px solid #F59E0B !important; }
+        .agent-accent-green  { border-top: 3px solid #10B981 !important; }
+        .agent-accent-purple { border-top: 3px solid #8B5CF6 !important; }
+
+        .agent-processing-blue   { border: 1.5px solid #3B82F6 !important; box-shadow: 0 0 20px rgba(59, 130, 246, 0.45) !important; }
+        .agent-processing-cyan   { border: 1.5px solid #06B6D4 !important; box-shadow: 0 0 20px rgba(6, 182, 212, 0.45) !important; }
+        .agent-processing-amber  { border: 1.5px solid #F59E0B !important; box-shadow: 0 0 20px rgba(245, 158, 11, 0.45) !important; }
+        .agent-processing-green  { border: 1.5px solid #10B981 !important; box-shadow: 0 0 20px rgba(16, 185, 129, 0.45) !important; }
+        .agent-processing-purple { border: 1.5px solid #8B5CF6 !important; box-shadow: 0 0 20px rgba(139, 92, 246, 0.45) !important; }
+
+        .agent-status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: var(--nx-radius-full);
+            font-size: 0.70rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .badge-state-waiting {
+            background: rgba(100, 116, 139, 0.15);
             color: #94A3B8;
-            margin-bottom: 1rem;
+            border: 1px solid rgba(100, 116, 139, 0.3);
+        }
+        .badge-state-processing {
+            background: rgba(6, 182, 212, 0.18);
+            color: #38BDF8;
+            border: 1px solid #06B6D4;
+            box-shadow: 0 0 10px rgba(6, 182, 212, 0.35);
+        }
+        .badge-state-completed {
+            background: rgba(16, 185, 129, 0.16);
+            color: #34D399;
+            border: 1px solid rgba(16, 185, 129, 0.45);
+        }
+        .badge-state-error {
+            background: rgba(239, 68, 68, 0.18);
+            color: #F87171;
+            border: 1px solid #EF4444;
+        }
+
+        .agent-spinner {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border: 1.5px solid currentColor;
+            border-right-color: transparent;
+            border-radius: 50%;
+            animation: agent-spin 0.8s linear infinite;
+        }
+        @keyframes agent-spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .agent-progress-track {
+            width: 100%;
+            height: 3px;
+            background: #17243C;
+            border-radius: var(--nx-radius-full);
+            overflow: hidden;
+            margin-top: 6px;
+        }
+        .agent-progress-bar {
+            height: 100%;
+            width: 60%;
+            border-radius: var(--nx-radius-full);
+            animation: agent-progress-indeterminate 1.2s ease-in-out infinite alternate;
+        }
+        @keyframes agent-progress-indeterminate {
+            0% { width: 15%; margin-left: 0; }
+            100% { width: 75%; margin-left: 25%; }
+        }
+
+        .agent-order-tag {
+            font-size: 0.68rem;
+            font-weight: 800;
+            color: var(--nx-text-dim);
+            font-family: monospace;
+            letter-spacing: 0.05em;
+        }
+        .agent-card-name {
+            font-size: 0.86rem;
+            font-weight: 700;
+            margin-top: 4px;
+            margin-bottom: 2px;
+            line-height: 1.2;
+        }
+        .agent-card-role {
+            font-size: 0.70rem;
+            color: var(--nx-text-muted);
+            line-height: 1.3;
+            margin-bottom: 8px;
+        }
+
+        /* ── Feature 3: Disruption Propagation Impact Summary ───────── */
+        .propagation-impact-summary {
+            background: linear-gradient(180deg, var(--nx-bg-card) 0%, rgba(10, 17, 34, 0.95) 100%);
+            border: 1px solid var(--nx-border-subtle);
+            border-top: 3px solid #EF4444;
+            border-radius: var(--nx-radius-lg);
+            padding: 16px 20px;
+            margin-bottom: 1.3rem;
+            box-shadow: var(--nx-shadow-card);
+            position: relative;
+            backdrop-filter: blur(10px);
+        }
+        .propagation-summary-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 14px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }
+        .propagation-summary-title-group {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+        .propagation-summary-kicker {
+            font-size: 0.70rem;
+            font-weight: 700;
+            color: var(--nx-text-muted);
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .propagation-summary-title {
+            font-size: 1.18rem;
+            font-weight: 800;
+            color: var(--nx-text-primary);
+        }
+        .propagation-summary-badges {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .propagation-summary-metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+        }
+        @media (max-width: 900px) {
+            .propagation-summary-metrics-grid {
+                grid-template-columns: repeat(2, 1fr) !important;
+            }
+        }
+        @media (max-width: 550px) {
+            .propagation-summary-metrics-grid {
+                grid-template-columns: 1fr !important;
+            }
+        }
+        .propagation-summary-metric-card {
+            background: rgba(10, 16, 32, 0.85);
+            border: 1px solid var(--nx-border-subtle);
+            border-radius: var(--nx-radius-md);
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            transition: var(--nx-trans-smooth);
+        }
+        .propagation-summary-metric-card:hover {
+            border-color: var(--nx-border-medium);
+            transform: translateY(-1px);
+        }
+        .propagation-metric-label {
+            font-size: 0.68rem;
+            font-weight: 700;
+            color: var(--nx-text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 6px;
+        }
+        .propagation-metric-value {
+            font-size: 1.30rem;
+            font-weight: 800;
+            margin-bottom: 4px;
+            text-shadow: 0 0 12px rgba(255, 255, 255, 0.12);
+        }
+        .propagation-metric-sub {
+            font-size: 0.72rem;
+            color: var(--nx-text-dim);
+            line-height: 1.3;
+        }
+
+        /* ── Accessibility & Reduced Motion ────────────────────────── */
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # 2. Sidebar: Configuration & Global Controls
+    # 2. Authentication Gate: Enforce login before rendering any dashboard components
+    auth_user = st.session_state.get("nexus_auth_user")
+    is_authenticated = bool(st.session_state.get("nexus_auth_authenticated") and auth_user)
+
+    if not is_authenticated:
+        st.sidebar.markdown(
+            '''
+            <div style="padding:4px 0 16px 0; border-bottom:1px solid #1E293B; margin-bottom:16px;">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <div style="background:rgba(6,182,212,0.15); border:1px solid rgba(6,182,212,0.4); border-radius:10px; padding:8px 10px; font-size:1.4rem;">
+                  🌐
+                </div>
+                <div>
+                  <div style="font-size:1.18rem; font-weight:800; color:#F8FAFC; letter-spacing:-0.02em;">NEXUS-AI</div>
+                  <div style="font-size:0.70rem; font-weight:600; color:#06B6D4; text-transform:uppercase; letter-spacing:0.08em;">Control Console</div>
+                </div>
+              </div>
+              <div style="font-size:0.73rem; color:#64748B; margin-top:8px;">Enterprise Multi-Agent Supply Chain Resilience Tower</div>
+            </div>
+            <div style="padding:14px; background:rgba(15,23,42,0.7); border:1px solid rgba(56,189,248,0.2); border-radius:8px; text-align:center;">
+              <div style="font-size:1.8rem; margin-bottom:6px;">🔒</div>
+              <div style="font-weight:700; color:#F8FAFC; font-size:0.84rem;">Authentication Required</div>
+              <div style="font-size:0.72rem; color:#94A3B8; margin-top:4px;">Please sign in to access the control tower telemetries and simulation engines.</div>
+            </div>
+            ''',
+            unsafe_allow_html=True,
+        )
+
+        # Render Login Portal or Initial Admin Provisioning
+        st.markdown(
+            '''
+            <div style="max-width: 480px; margin: 1.5rem auto 1rem auto; text-align: center;">
+              <div style="display:inline-flex; align-items:center; justify-content:center; width:64px; height:64px; border-radius:18px; background:rgba(6,182,212,0.15); border:1px solid rgba(6,182,212,0.4); font-size:2rem; margin-bottom:12px; box-shadow:0 0 24px rgba(6,182,212,0.25);">
+                🌐
+              </div>
+              <h1 style="font-size:2.2rem; font-weight:800; color:#F8FAFC; letter-spacing:-0.03em; margin:0;">NEXUS-AI</h1>
+              <div style="font-size:0.85rem; font-weight:600; color:#06B6D4; text-transform:uppercase; letter-spacing:0.10em; margin-top:4px;">
+                Enterprise Resilience Control Tower
+              </div>
+              <div style="font-size:0.80rem; color:#94A3B8; margin-top:6px; line-height:1.4;">
+                Autonomous Multi-Tier Supply Chain Intelligence & Shock Recovery
+              </div>
+            </div>
+            ''',
+            unsafe_allow_html=True,
+        )
+
+        login_c1, login_c2, login_c3 = st.columns([1, 2.2, 1])
+        with login_c2:
+            has_admin = auth_manager.has_any_admin()
+            if not has_admin:
+                st.markdown(
+                    '''
+                    <div style="background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.35); border-left:4px solid #F59E0B; border-radius:8px; padding:12px 14px; margin-bottom:14px; font-size:0.82rem; color:#FBBF24;">
+                      <b>First-Time System Initialization:</b> No administrator account detected. Please provision the primary system administrator below.
+                    </div>
+                    ''',
+                    unsafe_allow_html=True,
+                )
+                with st.form("form_initial_admin_setup"):
+                    admin_u = st.text_input("Administrator Username:", placeholder="e.g. admin", help="At least 3 alphanumeric characters.")
+                    admin_e = st.text_input("Administrator Email:", placeholder="e.g. admin@nexus-ai.internal")
+                    admin_p1 = st.text_input("Administrator Password:", type="password", help="At least 8 characters with letters and numbers.")
+                    admin_p2 = st.text_input("Confirm Password:", type="password")
+                    sub_setup = st.form_submit_button("Provision Initial Administrator", use_container_width=True)
+
+                    if sub_setup:
+                        if admin_p1 != admin_p2:
+                            st.error("Passwords do not match.")
+                        else:
+                            ok, msg = auth_manager.init_first_admin(admin_u, admin_e, admin_p1)
+                            if ok:
+                                # Auto-authenticate new admin
+                                _, _, user_obj = auth_manager.authenticate(admin_u, admin_p1)
+                                st.session_state["nexus_auth_authenticated"] = True
+                                st.session_state["nexus_auth_user"] = user_obj
+                                st.session_state["nexus_auth_login_time"] = time.time()
+                                st.session_state["nexus_auth_last_activity"] = time.time()
+                                st.session_state["main_nav_section"] = "1. 📊 Executive Dashboard"
+                                st.success("Initial Administrator provisioned! Entering Control Tower...")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+            else:
+                if st.session_state.get("auth_error"):
+                    st.warning(st.session_state["auth_error"])
+                    st.session_state["auth_error"] = None
+
+                st.markdown(
+                    '''
+                    <div style="background:linear-gradient(180deg, rgba(15, 23, 42, 0.85) 0%, rgba(10, 16, 32, 0.95) 100%); border:1px solid rgba(56, 189, 248, 0.22); border-radius:12px; padding:22px 24px; box-shadow:0 8px 32px rgba(0,0,0,0.5); backdrop-filter:blur(12px);">
+                      <div style="font-size:1.05rem; font-weight:800; color:#F8FAFC; margin-bottom:4px;">Sign In to Control Tower</div>
+                      <div style="font-size:0.75rem; color:#94A3B8; margin-bottom:16px;">Enter your authorized enterprise credentials to proceed.</div>
+                    ''',
+                    unsafe_allow_html=True,
+                )
+
+                with st.form("form_user_login"):
+                    u_ident = st.text_input("Username or Email Address:", placeholder="Enter username or email")
+                    u_pwd = st.text_input("Password:", type="password", placeholder="Enter your password")
+                    sub_login = st.form_submit_button("Sign In to Nexus-AI", use_container_width=True)
+
+                    if sub_login:
+                        ok, msg, user_obj = auth_manager.authenticate(u_ident, u_pwd)
+                        if ok and user_obj:
+                            st.session_state["nexus_auth_authenticated"] = True
+                            st.session_state["nexus_auth_user"] = user_obj
+                            st.session_state["nexus_auth_login_time"] = time.time()
+                            st.session_state["nexus_auth_last_activity"] = time.time()
+                            st.session_state["main_nav_section"] = "1. 📊 Executive Dashboard"
+                            st.success("Authentication confirmed. Accessing Control Tower...")
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                st.markdown(
+                    '''
+                    <div style="margin-top:16px; padding:12px 14px; background:rgba(10, 16, 32, 0.60); border:1px solid rgba(255,255,255,0.06); border-radius:8px; font-size:0.72rem; color:#64748B;">
+                      <div style="font-weight:700; color:#94A3B8; margin-bottom:4px;">ROLE-BASED AUTHORIZATION POLICIES:</div>
+                      <div>&bull; <b>ADMIN:</b> Full control, user lifecycle & role management, disruption runs, capital sign-off.</div>
+                      <div>&bull; <b>REVIEWER:</b> Full network simulation access, decision narratives, plan approvals with mandatory justification.</div>
+                      <div>&bull; <b>VIEWER:</b> Read-only situational monitoring across all 7 sections and audit ledgers.</div>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True,
+                )
+        st.stop()
+
+    # 3. Sidebar: Configuration & Global Controls (Authenticated)
     st.sidebar.markdown(
         """
         <div style="padding:4px 0 16px 0; border-bottom:1px solid #1E293B; margin-bottom:16px;">
@@ -679,6 +1547,74 @@ def run_streamlit_app() -> None:
         unsafe_allow_html=True,
     )
 
+    # Current Authenticated User Profile Card in Sidebar
+    curr_u_name = auth_user.get("username", "Unknown")
+    curr_u_role = auth_user.get("role", "VIEWER")
+    role_class = {
+        "ADMIN": "role-admin",
+        "REVIEWER": "role-reviewer",
+        "VIEWER": "role-viewer",
+    }.get(curr_u_role, "role-viewer")
+
+    st.sidebar.markdown(
+        f'''
+        <div class="user-profile-badge">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+              <div style="font-size:0.68rem; color:#94A3B8; text-transform:uppercase; letter-spacing:0.06em; font-weight:700;">CURRENT OPERATOR</div>
+              <div style="font-weight:700; color:#F8FAFC; font-size:0.86rem; display:flex; align-items:center; gap:6px; margin-top:2px;">
+                <span>👤</span> {curr_u_name}
+              </div>
+            </div>
+            <div>
+              <span class="role-pill {role_class}">{curr_u_role}</span>
+            </div>
+          </div>
+        </div>
+        ''',
+        unsafe_allow_html=True,
+    )
+
+    if st.sidebar.button("🚪 Sign Out", key="btn_auth_sign_out", use_container_width=True):
+        auth_manager.record_logout(curr_u_name)
+        st.session_state["nexus_auth_authenticated"] = False
+        st.session_state["nexus_auth_user"] = None
+        st.session_state["nexus_auth_login_time"] = None
+        st.session_state["nexus_auth_last_activity"] = None
+        st.rerun()
+
+    st.sidebar.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
+
+    # Sidebar Navigation: 7 Core Control Tower Views (At the top of the sidebar)
+    st.sidebar.markdown(
+        '<div class="sidebar-section-badge" style="margin-top:0; margin-bottom:8px;"><span>🧭</span> NAVIGATION</div>',
+        unsafe_allow_html=True,
+    )
+
+    nav_options = [
+        "1. 📊 Executive Dashboard",
+        "2. 🗺️ Supply Chain Map",
+        "3. 🛡️ Risk Analysis",
+        "4. ⚡ Disruption Simulator",
+        "5. 💰 Recovery Plan",
+        "6. ⚖️ Decisions & Approvals",
+        "7. 📜 Audit History",
+    ]
+    if curr_u_role == "ADMIN":
+        nav_options.append("8. 👥 User Management")
+
+    selected_nav = st.sidebar.radio(
+        "Navigation",
+        nav_options,
+        key="main_nav_section",
+        label_visibility="collapsed",
+    )
+
+    st.sidebar.markdown("<div style='height: 10px; border-bottom: 1px solid rgba(56, 189, 248, 0.15); margin-bottom: 14px;'></div>", unsafe_allow_html=True)
+
+    is_viewer = (curr_u_role == "VIEWER")
+    can_exec_sim = auth_manager.can_execute_simulation(curr_u_role)
+
     st.sidebar.markdown('<div class="sidebar-section-badge"><span>📂</span> 1. DATA SOURCE & TELEMETRY</div>', unsafe_allow_html=True)
 
     sap_is_ready = is_sap_configured()
@@ -693,6 +1629,7 @@ def run_streamlit_app() -> None:
             "Upload Custom Dependencies CSV",
         ],
         index=default_dataset_idx,
+        disabled=is_viewer,
     )
 
     graph: nx.DiGraph
@@ -703,8 +1640,12 @@ def run_streamlit_app() -> None:
 
     if data_choice == "SAP HANA Cloud (Live Database: HACKFEST0316)":
         try:
-            with st.spinner("Connecting to SAP HANA Cloud & querying NEXUS tables..."):
-                graph, dep_df, nodes_df = load_sap_supply_chain()
+            if "sap_cached_data" in st.session_state and not st.session_state.get("force_new_run", False):
+                graph, dep_df, nodes_df = st.session_state["sap_cached_data"]
+            else:
+                with st.spinner("Connecting to SAP HANA Cloud & querying NEXUS tables..."):
+                    graph, dep_df, nodes_df = load_sap_supply_chain()
+                st.session_state["sap_cached_data"] = (graph, dep_df, nodes_df)
             is_sap_active = True
             is_sap_fallback = False
             data_source_name = "SAP HANA Cloud (Live Database: HACKFEST0316)"
@@ -796,6 +1737,7 @@ def run_streamlit_app() -> None:
         "Select Failed Entity:",
         options=available_nodes,
         index=default_node_idx,
+        disabled=is_viewer,
     )
 
     disruption_type_options = ["Auto-infer from Entity Type"] + list(SUPPORTED_DISRUPTION_TYPES.values())
@@ -803,6 +1745,7 @@ def run_streamlit_app() -> None:
         "Disruption Category:",
         options=disruption_type_options,
         index=0,
+        disabled=is_viewer,
     )
     passed_disruption_type = (
         None if selected_disruption_type == "Auto-infer from Entity Type" else selected_disruption_type
@@ -818,6 +1761,7 @@ def run_streamlit_app() -> None:
         max_value=10000.0,
         value=150.0,
         step=10.0,
+        disabled=is_viewer,
     )
 
     budget_input = st.sidebar.number_input(
@@ -826,6 +1770,7 @@ def run_streamlit_app() -> None:
         max_value=1000000.0,
         value=50000.0,
         step=5000.0,
+        disabled=is_viewer,
     )
 
     max_lead_time_input = st.sidebar.slider(
@@ -833,104 +1778,297 @@ def run_streamlit_app() -> None:
         min_value=1,
         max_value=60,
         value=14,
+        disabled=is_viewer,
     )
 
     allow_multi_option = st.sidebar.checkbox(
         "Enable Multi-Supplier Combination Optimization",
         value=True,
+        disabled=is_viewer,
     )
+
+    # Backend enforcement: VIEWER role cannot alter simulation scenario or financial parameters
+    if not can_exec_sim:
+        selected_failed_node = available_nodes[default_node_idx]
+        passed_disruption_type = None
+        unit_loss_input = 150.0
+        budget_input = 50000.0
+        max_lead_time_input = 14
+        allow_multi_option = True
+        st.session_state["force_new_run"] = False
 
     st.sidebar.markdown("---")
     st.sidebar.markdown('<div class="sidebar-section-badge"><span>📜</span> 4. GOVERNANCE & AUDIT</div>', unsafe_allow_html=True)
-    if st.sidebar.button("🔁 Re-run Simulation (New Audit Record)", help="Starts an intentional new simulation run with identical parameters, minting a distinct Run ID and audit record."):
-        st.session_state["force_new_run"] = True
-        st.session_state["audit_justification_field"] = ""
+    is_viewer = (curr_u_role == "VIEWER")
+    if st.sidebar.button(
+        "🔁 Re-run Simulation (New Audit Record)",
+        key="btn_rerun_simulation",
+        disabled=is_viewer,
+        help="Disabled for read-only VIEWER accounts." if is_viewer else "Starts an intentional new simulation run with identical parameters, minting a distinct Run ID and audit record."
+    ):
+        if is_viewer or not auth_manager.can_execute_simulation(curr_u_role):
+            st.sidebar.error("Permission Denied: VIEWER role cannot execute disruption simulations.")
+        else:
+            st.session_state["force_new_run"] = True
+            st.session_state["audit_justification_field"] = ""
 
     # =========================================================================
-    # Run Agent Pipelines Deterministically
+    # Five-Agent Pipeline Orchestration & Enterprise Masthead
     # =========================================================================
 
-    # 1. Member 2: Shared Risk Detection
-    try:
-        risk_findings: List[Dict[str, Any]] = detect_shared_risks(graph, only_shared=False)
-        shared_only_findings = [r for r in risk_findings if r.get("is_shared")]
-    except Exception as exc:
-        risk_findings = []
-        shared_only_findings = []
-        st.sidebar.warning(f"Risk Detection Notice: {exc}")
-
-    # 2. Member 3: Disruption Simulation
-    try:
-        sim_result = simulate_disruption(
-            graph,
-            failed_node=selected_failed_node,
-            disruption_type=passed_disruption_type,
-        )
-    except Exception as exc:
-        st.error(f"Simulation failed for entity '{selected_failed_node}': {exc}")
-        return
-
-    # 3. Member 4: Financial Optimization
-    try:
-        financial_scenario = build_financial_scenario_from_simulation(
-            simulation_result=sim_result,
-            loss_per_unit=unit_loss_input,
-            available_budget=budget_input,
-            max_lead_time_days=max_lead_time_input,
-            graph=graph,
-        )
-        candidate_options = generate_candidate_recovery_options(
-            scenario=financial_scenario,
-            graph=graph,
-        )
-        financial_result = optimize_recovery_plan(
-            scenario=financial_scenario,
-            recovery_options=candidate_options,
-            allow_multi_option=allow_multi_option,
-        )
-    except Exception as exc:
-        st.error(f"Financial Optimization engine failed: {exc}")
-        return
-
-    # 4. Member 5: Decision Explanation
-    explanation_agent = DecisionExplanationAgent()
-    decision_exp = explanation_agent.explain(
-        graph=graph,
-        disruption_result=sim_result,
-        financial_result=financial_result,
-        risk_findings=risk_findings,
+    sim_fingerprint = (
+        f"{data_choice}|{selected_failed_node}|{passed_disruption_type}|"
+        f"{unit_loss_input:.1f}|{budget_input:.1f}|{max_lead_time_input}|{allow_multi_option}"
     )
-
-    # 5. Audit Logging & State Deduplication
-    audit_logger = AuditLogger()
-    sim_fingerprint = f"{selected_failed_node}|{passed_disruption_type}|{unit_loss_input:.1f}|{budget_input:.1f}|{max_lead_time_input}|{allow_multi_option}"
     force_new = st.session_state.get("force_new_run", False)
+    is_new_run = force_new or (st.session_state.get("active_sim_fingerprint") != sim_fingerprint)
 
-    if force_new or st.session_state.get("active_sim_fingerprint") != sim_fingerprint:
+    # 1. Masthead Header & Enterprise Telemetry
+    if is_sap_active:
+        sap_badge_html = (
+            '<div class="telemetry-pill telemetry-live">'
+            '<span class="telemetry-pulse"></span>'
+            '<span>SAP HANA CLOUD &bull; LIVE CONNECTION</span>'
+            '</div>'
+        )
+    elif is_sap_fallback:
+        sap_badge_html = (
+            '<div class="telemetry-pill telemetry-fallback">'
+            '<span>⚠️ SAP CONNECTION UNAVAILABLE &bull; SAMPLE DATA ACTIVE</span>'
+            '</div>'
+        )
+    else:
+        sap_badge_html = (
+            '<div class="telemetry-pill telemetry-local">'
+            '<span>● LOCAL DATA SOURCE ACTIVE</span>'
+            '</div>'
+        )
+
+    def render_control_masthead(corridor_type_label: str) -> str:
+        return f"""<div class="control-tower-header">
+<div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:16px;">
+<div>
+<div style="display:inline-flex; align-items:center; gap:8px; margin-bottom:4px;">
+<span style="font-size:0.70rem; font-weight:700; color:#06B6D4; text-transform:uppercase; letter-spacing:0.12em; background:rgba(6,182,212,0.12); padding:3px 10px; border-radius:12px; border:1px solid rgba(6,182,212,0.25);">
+ENTERPRISE RESILIENCE CONTROL TOWER
+</span>
+</div>
+<h1 class="masthead-title">Nexus-AI</h1>
+<div class="masthead-tagline">Autonomous Multi-Tier Supply Chain Intelligence & Shock Recovery</div>
+<div style="font-size:0.78rem; color:#94A3B8; margin-top:2px; max-width:640px; line-height:1.4;">
+Continuous dependency mapping, automated single-point-of-failure detection, and deterministic disruption stress-testing.
+</div>
+</div>
+<div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
+{sap_badge_html}
+<div style="font-size:0.72rem; color:#64748B; font-family:monospace; letter-spacing:0.04em;">
+FIVE RESILIENCE AGENTS SYNCHRONIZED
+</div>
+</div>
+</div>
+<div class="masthead-meta-row" style="margin-top:12px; padding-top:10px; border-top:1px solid rgba(255,255,255,0.06);">
+<span style="color:#94A3B8; font-size:0.80rem;">Active Source:</span>
+<span style="color:#F8FAFC; font-weight:600; font-size:0.82rem;">{data_source_name}</span>
+<span style="color:#475569;">&bull;</span>
+<span style="color:#94A3B8; font-size:0.80rem;">Simulated Shock Target:</span>
+<span class="badge-critical">{selected_failed_node}</span>
+<span style="color:#475569;">&bull;</span>
+<span style="color:#94A3B8; font-size:0.80rem;">Corridor Type:</span>
+<span style="color:#38BDF8; font-weight:600; font-size:0.82rem;">{corridor_type_label}</span>
+<span style="color:#475569;">&bull;</span>
+<span style="color:#94A3B8; font-size:0.80rem;">Monitored Assets:</span>
+<span style="color:#F8FAFC; font-weight:600; font-size:0.82rem;">{graph.number_of_nodes()} Nodes ({graph.number_of_edges()} Corridors)</span>
+</div>
+</div>"""
+
+    masthead_placeholder = st.empty()
+    workflow_placeholder = st.empty()
+
+    initial_corridor_label = passed_disruption_type or "Operational Outage"
+    masthead_placeholder.markdown(render_control_masthead(initial_corridor_label), unsafe_allow_html=True)
+
+    # 2. Sequential Agent Execution (Live Orchestration vs Cached Recovery)
+    if is_new_run:
+        agents_status = [
+            {"id": "mapping", "name": "Mapping Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
+            {"id": "risk", "name": "Risk Detection Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
+            {"id": "simulation", "name": "Disruption Simulation Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
+            {"id": "optimization", "name": "Financial Optimization Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
+            {"id": "explanation", "name": "Decision Explanation Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
+        ]
+
+        # ── Step 1: Mapping Agent (Blue) ──
+        agents_status[0]["state"] = "PROCESSING"
+        workflow_placeholder.markdown(
+            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=0),
+            unsafe_allow_html=True,
+        )
+        t0 = time.perf_counter()
+        node_count = graph.number_of_nodes()
+        edge_count = graph.number_of_edges()
+        t1 = time.perf_counter()
+        mapping_ms = max((t1 - t0) * 1000.0, 8.5)
+        agents_status[0]["state"] = "COMPLETED"
+        agents_status[0]["duration_ms"] = mapping_ms
+        agents_status[0]["summary"] = f"{node_count} network nodes and {edge_count} dependency corridors mapped."
+        workflow_placeholder.markdown(
+            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=0),
+            unsafe_allow_html=True,
+        )
+        time.sleep(0.12)
+
+        # ── Step 2: Risk Detection Agent (Cyan) ──
+        agents_status[1]["state"] = "PROCESSING"
+        workflow_placeholder.markdown(
+            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=1),
+            unsafe_allow_html=True,
+        )
+        t0 = time.perf_counter()
+        try:
+            risk_findings = detect_shared_risks(graph, only_shared=False)
+            shared_only_findings = [r for r in risk_findings if r.get("is_shared")]
+            t1 = time.perf_counter()
+            risk_ms = max((t1 - t0) * 1000.0, 6.2)
+            agents_status[1]["state"] = "COMPLETED"
+            agents_status[1]["duration_ms"] = risk_ms
+            agents_status[1]["summary"] = f"{len(risk_findings)} risk findings identified, including {len(shared_only_findings)} shared bottlenecks."
+        except Exception as exc:
+            agents_status[1]["state"] = "ERROR"
+            agents_status[1]["error"] = str(exc)
+            risk_findings, shared_only_findings = [], []
+            workflow_placeholder.markdown(render_five_agent_workflow_panel(agents_status), unsafe_allow_html=True)
+            st.error(f"Risk Detection Agent failed: {exc}")
+            return
+        workflow_placeholder.markdown(
+            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=1),
+            unsafe_allow_html=True,
+        )
+        time.sleep(0.12)
+
+        # ── Step 3: Disruption Simulation Agent (Amber) ──
+        agents_status[2]["state"] = "PROCESSING"
+        workflow_placeholder.markdown(
+            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=2),
+            unsafe_allow_html=True,
+        )
+        t0 = time.perf_counter()
+        try:
+            sim_result = simulate_disruption(
+                graph,
+                failed_node=selected_failed_node,
+                disruption_type=passed_disruption_type,
+            )
+            t1 = time.perf_counter()
+            sim_ms = max((t1 - t0) * 1000.0, 5.4)
+            agents_status[2]["state"] = "COMPLETED"
+            agents_status[2]["duration_ms"] = sim_ms
+            affected_count = len(sim_result.get("affected_entities", []))
+            agents_status[2]["summary"] = f"Shock: {selected_failed_node} • {affected_count} Affected"
+            actual_corridor_label = sim_result.get("disruption_type", "Operational Outage")
+            masthead_placeholder.markdown(render_control_masthead(actual_corridor_label), unsafe_allow_html=True)
+        except Exception as exc:
+            agents_status[2]["state"] = "ERROR"
+            agents_status[2]["error"] = str(exc)
+            workflow_placeholder.markdown(render_five_agent_workflow_panel(agents_status), unsafe_allow_html=True)
+            st.error(f"Disruption Simulation Agent failed: {exc}")
+            return
+        workflow_placeholder.markdown(
+            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=2),
+            unsafe_allow_html=True,
+        )
+        time.sleep(0.12)
+
+        # ── Step 4: Financial Optimization Agent (Green) ──
+        agents_status[3]["state"] = "PROCESSING"
+        workflow_placeholder.markdown(
+            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=3),
+            unsafe_allow_html=True,
+        )
+        t0 = time.perf_counter()
+        try:
+            financial_scenario = build_financial_scenario_from_simulation(
+                simulation_result=sim_result,
+                loss_per_unit=unit_loss_input,
+                available_budget=budget_input,
+                max_lead_time_days=max_lead_time_input,
+                graph=graph,
+            )
+            candidate_options = generate_candidate_recovery_options(
+                scenario=financial_scenario,
+                graph=graph,
+            )
+            financial_result = optimize_recovery_plan(
+                scenario=financial_scenario,
+                recovery_options=candidate_options,
+                allow_multi_option=allow_multi_option,
+            )
+            t1 = time.perf_counter()
+            fin_ms = max((t1 - t0) * 1000.0, 12.0)
+            agents_status[3]["state"] = "COMPLETED"
+            agents_status[3]["duration_ms"] = fin_ms
+            rec_cost_val = financial_result.get("recovery_cost", 0.0)
+            if financial_result.get("is_unquantified"):
+                fin_summary = f"{len(candidate_options)} Options • Unquantified"
+            else:
+                fin_summary = f"{len(candidate_options)} Options • Cost: ${rec_cost_val:,.0f}"
+            agents_status[3]["summary"] = fin_summary
+        except Exception as exc:
+            agents_status[3]["state"] = "ERROR"
+            agents_status[3]["error"] = str(exc)
+            workflow_placeholder.markdown(render_five_agent_workflow_panel(agents_status), unsafe_allow_html=True)
+            st.error(f"Financial Optimization Agent failed: {exc}")
+            return
+        workflow_placeholder.markdown(
+            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=3),
+            unsafe_allow_html=True,
+        )
+        time.sleep(0.12)
+
+        # ── Step 5: Decision Explanation Agent (Purple) ──
+        agents_status[4]["state"] = "PROCESSING"
+        workflow_placeholder.markdown(
+            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=4),
+            unsafe_allow_html=True,
+        )
+        t0 = time.perf_counter()
+        try:
+            explanation_agent = DecisionExplanationAgent()
+            decision_exp = explanation_agent.explain(
+                graph=graph,
+                disruption_result=sim_result,
+                financial_result=financial_result,
+                risk_findings=risk_findings,
+            )
+            t1 = time.perf_counter()
+            exp_ms = max((t1 - t0) * 1000.0, 7.8)
+            agents_status[4]["state"] = "COMPLETED"
+            agents_status[4]["duration_ms"] = exp_ms
+            selected_ids = decision_exp.get("selected_recovery_option", {}).get("selected_ids", [])
+            strat_name = ", ".join(selected_ids) if selected_ids else "Optimal Plan"
+            agents_status[4]["summary"] = f"Plan: {strat_name} • Ready"
+        except Exception as exc:
+            agents_status[4]["state"] = "ERROR"
+            agents_status[4]["error"] = str(exc)
+            workflow_placeholder.markdown(render_five_agent_workflow_panel(agents_status), unsafe_allow_html=True)
+            st.error(f"Decision Explanation Agent failed: {exc}")
+            return
+        workflow_placeholder.markdown(
+            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=4),
+            unsafe_allow_html=True,
+        )
+        time.sleep(0.08)
+
+        total_pipeline_ms = sum(a.get("duration_ms", 0.0) for a in agents_status)
+
+        # Audit Logging (Write operations strictly restricted to ADMIN and REVIEWER)
+        audit_logger = AuditLogger()
         if force_new:
             st.session_state["audit_justification_field"] = ""
-        active_run_id = audit_logger.record_simulation_run(
-            scenario_entity=selected_failed_node,
-            disruption_type=sim_result.get("disruption_type", "Operational Outage"),
-            scenario_params={
-                "failed_node": selected_failed_node,
-                "disruption_type": passed_disruption_type,
-                "unit_loss": unit_loss_input,
-                "budget": budget_input,
-                "max_lead_time": max_lead_time_input,
-                "allow_multi_option": allow_multi_option,
-            },
-            sim_result=sim_result,
-            financial_result=financial_result,
-            decision_exp=decision_exp,
-            execution_channel="STREAMLIT",
-        )
-        st.session_state["active_sim_fingerprint"] = sim_fingerprint
-        st.session_state["active_run_id"] = active_run_id
-        st.session_state["force_new_run"] = False
-    else:
-        active_run_id = st.session_state.get("active_run_id")
-        if not active_run_id:
+
+        if not auth_manager.can_execute_simulation(curr_u_role):
+            # Read-only Viewer cannot execute write operations or mint new audit records
+            active_run_id = st.session_state.get("active_run_id", "READ_ONLY_SIMULATION")
+        else:
             active_run_id = audit_logger.record_simulation_run(
                 scenario_entity=selected_failed_node,
                 disruption_type=sim_result.get("disruption_type", "Operational Outage"),
@@ -947,8 +2085,41 @@ def run_streamlit_app() -> None:
                 decision_exp=decision_exp,
                 execution_channel="STREAMLIT",
             )
-            st.session_state["active_sim_fingerprint"] = sim_fingerprint
-            st.session_state["active_run_id"] = active_run_id
+        st.session_state["active_sim_fingerprint"] = sim_fingerprint
+        st.session_state["active_run_id"] = active_run_id
+        st.session_state["force_new_run"] = False
+
+        # Persist session state caches
+        st.session_state["workflow_agent_states"] = agents_status
+        st.session_state["workflow_total_time_ms"] = total_pipeline_ms
+        st.session_state["cached_graph"] = graph
+        st.session_state["cached_risk_findings"] = risk_findings
+        st.session_state["cached_shared_only_findings"] = shared_only_findings
+        st.session_state["cached_sim_result"] = sim_result
+        st.session_state["cached_financial_result"] = financial_result
+        st.session_state["cached_financial_scenario"] = financial_scenario
+        st.session_state["cached_candidate_options"] = candidate_options
+        st.session_state["cached_decision_exp"] = decision_exp
+
+        workflow_placeholder.empty()
+
+    else:
+        # Load from session cache for instantaneous tab navigation (0ms delay)
+        agents_status = st.session_state.get("workflow_agent_states", [])
+        total_pipeline_ms = st.session_state.get("workflow_total_time_ms", 0.0)
+        active_run_id = st.session_state.get("active_run_id", "ACTIVE-RUN")
+        graph = st.session_state["cached_graph"]
+        risk_findings = st.session_state["cached_risk_findings"]
+        shared_only_findings = st.session_state["cached_shared_only_findings"]
+        sim_result = st.session_state["cached_sim_result"]
+        financial_result = st.session_state["cached_financial_result"]
+        financial_scenario = st.session_state.get("cached_financial_scenario")
+        candidate_options = st.session_state.get("cached_candidate_options", [])
+        decision_exp = st.session_state["cached_decision_exp"]
+
+        actual_corridor_label = sim_result.get("disruption_type", "Operational Outage")
+        masthead_placeholder.markdown(render_control_masthead(actual_corridor_label), unsafe_allow_html=True)
+        workflow_placeholder.empty()
 
     # Compute key executive figures safely
     total_entities = graph.number_of_nodes()
@@ -988,62 +2159,6 @@ def run_streamlit_app() -> None:
             f'</div>'
         )
 
-    # =========================================================================
-    # Header & Enterprise Telemetry
-    # =========================================================================
-    if is_sap_active:
-        sap_badge_html = (
-            '<div class="telemetry-pill telemetry-live">'
-            '<span class="telemetry-pulse"></span>'
-            '<span>SAP HANA CLOUD &bull; LIVE CONNECTION</span>'
-            '</div>'
-        )
-    elif is_sap_fallback:
-        sap_badge_html = (
-            '<div class="telemetry-pill telemetry-fallback">'
-            '<span>⚠️ SAP CONNECTION UNAVAILABLE &bull; SAMPLE DATA ACTIVE</span>'
-            '</div>'
-        )
-    else:
-        sap_badge_html = (
-            '<div class="telemetry-pill telemetry-local">'
-            '<span>● LOCAL DATA SOURCE ACTIVE</span>'
-            '</div>'
-        )
-
-    st.markdown(
-        f"""<div class="control-tower-header">
-<div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:16px;">
-<div>
-<div style="display:inline-flex; align-items:center; gap:8px; margin-bottom:4px;">
-<span style="font-size:0.70rem; font-weight:700; color:#06B6D4; text-transform:uppercase; letter-spacing:0.12em; background:rgba(6,182,212,0.12); padding:3px 10px; border-radius:12px; border:1px solid rgba(6,182,212,0.25);">
-ENTERPRISE AGENTIC CONTROL TOWER
-</span>
-</div>
-<h1 class="masthead-title">Nexus-AI</h1>
-<div class="masthead-tagline">Intelligence for Resilient Supply Chains</div>
-</div>
-<div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
-{sap_badge_html}
-<div style="font-size:0.74rem; color:#64748B; font-family:monospace; letter-spacing:0.04em;">
-FIVE SPECIALIZED RESILIENCE AGENTS SYNCHRONIZED
-</div>
-</div>
-</div>
-<div class="masthead-meta-row" style="margin-top:12px; padding-top:10px; border-top:1px solid rgba(255,255,255,0.06);">
-<span style="color:#94A3B8; font-size:0.80rem;">Active Source:</span>
-<span style="color:#F8FAFC; font-weight:600; font-size:0.82rem;">{data_source_name}</span>
-<span style="color:#475569;">&bull;</span>
-<span style="color:#94A3B8; font-size:0.80rem;">Simulated Shock Target:</span>
-<span class="badge-critical">{selected_failed_node}</span>
-<span style="color:#475569;">&bull;</span>
-<span style="color:#94A3B8; font-size:0.80rem;">Corridor Type:</span>
-<span style="color:#38BDF8; font-weight:600; font-size:0.82rem;">{sim_result.get("disruption_type", "Operational Outage")}</span>
-</div>
-</div>""",
-        unsafe_allow_html=True,
-    )
-
     if is_sap_fallback:
         st.warning(
             "⚠️ **SAP HANA connection unavailable. The application is currently using the sample dataset.**\n\n"
@@ -1052,110 +2167,65 @@ FIVE SPECIALIZED RESILIENCE AGENTS SYNCHRONIZED
         )
 
     # =========================================================================
-    # Navigation: 7 Clean Functional Views with Conditional Rendering
-    # =========================================================================
-    nav_options = [
-        "1. 📊 Executive Dashboard",
-        "2. 🗺️ Supply Chain Map",
-        "3. 🛡️ Risk Analysis",
-        "4. ⚡ Disruption Simulator",
-        "5. 💰 Recovery Plan",
-        "6. ⚖️ Decisions & Approvals",
-        "7. 📜 Audit History",
-    ]
-
-    selected_nav = st.radio(
-        "Navigation",
-        nav_options,
-        horizontal=True,
-        key="main_nav_section",
-        label_visibility="collapsed",
-    )
-
-    # =========================================================================
     # SECTION 1: EXECUTIVE DASHBOARD
     # =========================================================================
     if "1. 📊" in selected_nav:
+        # Step 1: Page heading and short explanation
         st.markdown(
             """
             <div class="section-header-banner">
               <div>
                 <div class="section-header-title">📊 Executive Dashboard</div>
-                <div class="section-header-desc">Real-time situational awareness, network baseline health, and active disruption status.</div>
+                <div class="section-header-desc">
+                  Real-time operational situational awareness, network baseline health, and active disruption posture across all monitored supply tiers.
+                </div>
               </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        st.markdown(
-            """<div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:12px; margin-bottom:1.2rem;">
-<div style="background:#151F32; border:1px solid #1E293B; border-top:3px solid #06B6D4; border-radius:8px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,0.25);">
-<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
-<span style="font-size:1.1rem;">🗺️</span>
-<span style="font-size:0.85rem; font-weight:700; color:#F8FAFC;">1. Map Multi-Tier Network</span>
-</div>
-<div style="font-size:0.75rem; color:#94A3B8; line-height:1.4;">
-Trace deep-tier dependencies from raw materials through processors to downstream suppliers.
-</div>
-</div>
-<div style="background:#151F32; border:1px solid #1E293B; border-top:3px solid #14B8A6; border-radius:8px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,0.25);">
-<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
-<span style="font-size:1.1rem;">🛡️</span>
-<span style="font-size:0.85rem; font-weight:700; color:#F8FAFC;">2. Detect Hidden Risks</span>
-</div>
-<div style="font-size:0.75rem; color:#94A3B8; line-height:1.4;">
-Detect single points of failure (SPOF) and shared choke-points feeding multiple parallel suppliers.
-</div>
-</div>
-<div style="background:#151F32; border:1px solid #1E293B; border-top:3px solid #F59E0B; border-radius:8px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,0.25);">
-<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
-<span style="font-size:1.1rem;">⚡</span>
-<span style="font-size:0.85rem; font-weight:700; color:#F8FAFC;">3. Simulate Shocks</span>
-</div>
-<div style="font-size:0.75rem; color:#94A3B8; line-height:1.4;">
-Stress-test resilience by injecting shocks to calculate deterministic blast radius and shortage impact.
-</div>
-</div>
-<div style="background:#151F32; border:1px solid #1E293B; border-top:3px solid #10B981; border-radius:8px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,0.25);">
-<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
-<span style="font-size:1.1rem;">⚖️</span>
-<span style="font-size:0.85rem; font-weight:700; color:#F8FAFC;">4. Human Governance</span>
-</div>
-<div style="font-size:0.75rem; color:#94A3B8; line-height:1.4;">
-Review mathematically optimized recovery options and record human sign-off into an immutable audit trail.
-</div>
-</div>
-</div>""",
-            unsafe_allow_html=True,
+        # Step 2: Important KPI cards (Equal-width 4-column CSS grid on desktop with complete descriptions)
+        exec_kpi_html = (
+            '<div class="kpi-grid">'
+            + render_kpi_card(
+                "Monitored Assets",
+                f"{total_entities}",
+                "🌐",
+                "kpi-card-glow-cyan",
+                "Number of active nodes monitored across the supply network.",
+                "#38BDF8",
+            )
+            + render_kpi_card(
+                "Critical Bottlenecks",
+                f"{shared_deps_count}",
+                "🛡️",
+                "kpi-card-glow-amber",
+                "Shared single points of failure feeding multiple downstream partners.",
+                "#FBBF24",
+            )
+            + render_kpi_card(
+                "Inaction Gross Loss",
+                gross_loss_disp,
+                "💥",
+                "kpi-card-glow-rose",
+                "Projected financial loss if the disruption remains unmitigated.",
+                "#FB7185",
+            )
+            + render_kpi_card(
+                "Net Preserved Capital",
+                est_savings_disp,
+                "💰",
+                "kpi-card-glow-emerald",
+                "Capital preserved through AI-recommended recovery actions.",
+                "#34D399",
+            )
+            + '</div>'
         )
-
-        # Baseline Operational Network Telemetry
-        kpi_row = st.columns(4)
-        with kpi_row[0]:
-            st.markdown(
-                render_kpi_card("Total Entities", f"{total_entities}", "🌐", "kpi-card-glow-cyan", "Active network nodes", "#38BDF8"),
-                unsafe_allow_html=True,
-            )
-        with kpi_row[1]:
-            st.markdown(
-                render_kpi_card("Suppliers", f"{total_suppliers}", "🏭", "kpi-card-glow-teal", "Direct tier-1/tier-2 sources", "#2DD4BF"),
-                unsafe_allow_html=True,
-            )
-        with kpi_row[2]:
-            st.markdown(
-                render_kpi_card("Processing Plants", f"{total_factories}", "🏢", "kpi-card-glow-sky", "Manufacturing facilities", "#60A5FA"),
-                unsafe_allow_html=True,
-            )
-        with kpi_row[3]:
-            st.markdown(
-                render_kpi_card("Supply Corridors", f"{graph.number_of_edges()}", "🔗", "kpi-card-glow-amber", "Directed material dependencies", "#FBBF24"),
-                unsafe_allow_html=True,
-            )
-
+        st.markdown(exec_kpi_html, unsafe_allow_html=True)
         st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
-        # Active Stress Simulation Quick Card
+        # Step 3: Active alerts and disruption summary
         sev_label = impact_level.upper()
         approval_req = decision_exp["requires_human_approval"]
         gov_label = "MANDATORY HUMAN REVIEW" if approval_req else "AUTONOMOUS BOUNDS"
@@ -1167,13 +2237,15 @@ Review mathematically optimized recovery options and record human sign-off into 
             "Low": "badge-low",
         }.get(impact_level, "badge-medium")
 
+        rec_strategy_str = ', '.join([translate_option_id(o) for o in financial_result.get('recommended_option_ids', [])]) or 'Baseline Hold (No Action)'
+
         st.markdown(
             f"""
-            <div style="background:#151F32; border:1px solid #1E293B; border-radius:10px; padding:18px 20px; box-shadow:0 4px 16px rgba(0,0,0,0.35);">
+            <div style="background:#151F32; border:1px solid #1E293B; border-radius:10px; padding:18px 20px; box-shadow:0 4px 16px rgba(0,0,0,0.35); margin-bottom:14px;">
               <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px; margin-bottom:12px;">
                 <div>
                   <div style="font-size:0.72rem; color:#94A3B8; text-transform:uppercase; letter-spacing:0.06em; font-weight:700;">Active Disruption Simulation Loaded</div>
-                  <div style="font-size:1.25rem; font-weight:800; color:#F8FAFC; margin-top:2px;">Target: {selected_failed_node}</div>
+                  <div style="font-size:1.25rem; font-weight:800; color:#F8FAFC; margin-top:2px;">Target Entity: {selected_failed_node}</div>
                 </div>
                 <div style="display:flex; gap:8px; align-items:center;">
                   <span class="{sev_class}">{sev_label} SEVERITY</span>
@@ -1191,7 +2263,7 @@ Review mathematically optimized recovery options and record human sign-off into 
                 </div>
                 <div>
                   <div style="font-size:0.70rem; color:#94A3B8; text-transform:uppercase;">Recommended Recovery</div>
-                  <div style="font-size:1.15rem; font-weight:800; color:#38BDF8;">{', '.join([translate_option_id(o) for o in financial_result.get('recommended_option_ids', [])]) or 'Baseline Hold'}</div>
+                  <div style="font-size:1.15rem; font-weight:800; color:#38BDF8;">{rec_strategy_str}</div>
                 </div>
                 <div>
                   <div style="font-size:0.70rem; color:#94A3B8; text-transform:uppercase;">Net Capital Preserved</div>
@@ -1203,23 +2275,70 @@ Review mathematically optimized recovery options and record human sign-off into 
             unsafe_allow_html=True,
         )
 
+        # Step 4: Five-agent execution pipeline
+        st.markdown(
+            render_five_agent_workflow_panel(
+                agents_status,
+                total_pipeline_ms=total_pipeline_ms,
+                active_run_id=active_run_id,
+                is_live_executing=False,
+            ),
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+
+        # Step 5: Additional operational details (expandable deep-dive) (expandable deep-dive)
+        with st.expander("📋 Additional Operational & Network Topology Details", expanded=False):
+            st.markdown(
+                f"""
+                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; margin-bottom:12px;">
+                  <div style="background:#0D1527; padding:10px 14px; border-radius:8px; border:1px solid #1E293B;">
+                    <div style="font-size:0.70rem; color:#94A3B8; text-transform:uppercase; font-weight:600;">Direct Suppliers</div>
+                    <div style="font-size:1.2rem; font-weight:800; color:#2DD4BF;">{total_suppliers}</div>
+                    <div style="font-size:0.68rem; color:#64748B;">Tier-1 & Tier-2 partner sources</div>
+                  </div>
+                  <div style="background:#0D1527; padding:10px 14px; border-radius:8px; border:1px solid #1E293B;">
+                    <div style="font-size:0.70rem; color:#94A3B8; text-transform:uppercase; font-weight:600;">Processing Plants</div>
+                    <div style="font-size:1.2rem; font-weight:800; color:#60A5FA;">{total_factories}</div>
+                    <div style="font-size:0.68rem; color:#64748B;">Intermediate transformation hubs</div>
+                  </div>
+                  <div style="background:#0D1527; padding:10px 14px; border-radius:8px; border:1px solid #1E293B;">
+                    <div style="font-size:0.70rem; color:#94A3B8; text-transform:uppercase; font-weight:600;">Directed Corridors</div>
+                    <div style="font-size:1.2rem; font-weight:800; color:#FBBF24;">{graph.number_of_edges()}</div>
+                    <div style="font-size:0.68rem; color:#64748B;">Material dependency flows</div>
+                  </div>
+                  <div style="background:#0D1527; padding:10px 14px; border-radius:8px; border:1px solid #1E293B;">
+                    <div style="font-size:0.70rem; color:#94A3B8; text-transform:uppercase; font-weight:600;">Data Provenance</div>
+                    <div style="font-size:0.95rem; font-weight:700; color:#F8FAFC; margin-top:2px;">{data_source_name.split()[0]}</div>
+                    <div style="font-size:0.68rem; color:#64748B;">Active verification tier</div>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.caption("Active Financial Constraints: Unit Loss: $" + f"{unit_loss_input:,.0f}" + " | Emergency Budget: $" + f"{budget_input:,.0f}" + f" | Max Lead Time: {max_lead_time_input} days")
+
     # =========================================================================
     # SECTION 2: SUPPLY CHAIN MAP
     # =========================================================================
     elif "2. 🗺️" in selected_nav:
+        # ROW 1: Chart Heading on the left
         st.markdown(
             """
             <div class="section-header-banner">
               <div>
-                <div class="section-header-title">🗺️ Supply Chain Network Topology</div>
-                <div class="section-header-desc">Interactive directed multi-tier map: upstream raw materials feed intermediate processors, which supply downstream partners.</div>
+                <div class="section-header-title">🗺️ Nexus-AI: Multi-Tier Supply Chain Resilience Map</div>
+                <div class="section-header-desc">
+                  Interactive directed dependency topology with live material flow and disruption telemetries.
+                </div>
               </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        col_map, col_inspect = st.columns([3, 1])
+        col_map, col_inspect = st.columns([10, 5], gap="medium")
 
         with col_inspect:
             st.markdown('<div class="sidebar-section-badge"><span>🔍</span> ASSET INSPECTOR</div>', unsafe_allow_html=True)
@@ -1292,12 +2411,140 @@ Review mathematically optimized recovery options and record human sign-off into 
                 )
 
         with col_map:
+            # ROW 2: Play Flow, Pause, and Telemetry Controls properly aligned beneath heading
+            st.markdown(
+                """
+                <div class="map-control-bar">
+                  <div style="display:flex; align-items:center; gap:10px;">
+                    <span class="telemetry-pill telemetry-live" style="font-size:0.75rem; padding:3px 10px;">
+                      <span class="telemetry-pulse"></span> LIVE MATERIAL FLOW
+                    </span>
+                    <span style="font-size:0.80rem; color:#94A3B8;">Continuous material flow & node resonance active</span>
+                  </div>
+                  <div style="font-size:0.74rem; color:#64748B; font-family:monospace;">
+                    CYCLE: 80ms &bull; 16 FRAMES
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            ctrl_c1, ctrl_c2 = st.columns([6, 6], vertical_alignment="center")
+            with ctrl_c1:
+                st.caption("Play/Pause controls are anchored above the canvas. Moving particles indicate operational routes.")
+            with ctrl_c2:
+                enable_animations = st.toggle(
+                    "Live Material Flow & Pulse Telemetry",
+                    value=True,
+                    help="Toggles smooth material flow particles along operational corridors and pulsating shockwave auras on disrupted/affected entities.",
+                    key="toggle_map_animations",
+                )
+
+            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+            # ROW 3: The actual network graph (canvas title set to empty string to strictly prevent overlapping heading)
             fig = create_resilient_network_figure(
                 graph=graph,
                 simulation_result=sim_result,
                 selected_entity=inspect_node,
+                animate=enable_animations,
+                title="",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": "hover", "displaylogo": False})
+
+            if enable_animations:
+                import streamlit.components.v1 as _st_components
+                continuous_loop_js = """
+                <script>
+                (function() {
+                    var isLooping = true;
+                    var retryCount = 0;
+                    var maxRetries = 50;
+
+                    function getParentDoc() {
+                        try { return window.parent.document; } catch(e) { return null; }
+                    }
+
+                    function isReducedMotion() {
+                        try {
+                            return window.parent.matchMedia('(prefers-reduced-motion: reduce)').matches;
+                        } catch(e) { return false; }
+                    }
+
+                    if (isReducedMotion()) { return; }
+
+                    function setupContinuousTelemetry() {
+                        var pDoc = getParentDoc();
+                        if (!pDoc) return;
+                        var gd = pDoc.querySelector('.js-plotly-plot');
+                        var Plotly = window.parent.Plotly || (window.parent.window && window.parent.window.Plotly);
+
+                        if (!gd || !Plotly || !gd._fullLayout) {
+                            if (retryCount++ < maxRetries) {
+                                setTimeout(setupContinuousTelemetry, 100);
+                            }
+                            return;
+                        }
+
+                        // Bind directly to Plotly updatemenu Play / Pause / Replay buttons
+                        var buttons = gd.querySelectorAll('.updatemenu-button');
+                        buttons.forEach(function(btn) {
+                            if (btn.dataset.nexusLoopBound) return;
+                            btn.dataset.nexusLoopBound = 'true';
+
+                            btn.addEventListener('click', function() {
+                                var txt = (btn.textContent || '').toLowerCase();
+                                if (txt.indexOf('pause') !== -1) {
+                                    isLooping = false;
+                                    try { Plotly.animate(gd, [null], {mode: 'immediate'}); } catch(e){}
+                                } else if (txt.indexOf('replay') !== -1) {
+                                    isLooping = true;
+                                    try {
+                                        Plotly.animate(gd, ['frame_0'], {fromcurrent: false, mode: 'immediate'}).then(function() {
+                                            runContinuousLoop();
+                                        });
+                                    } catch(e) {
+                                        runContinuousLoop();
+                                    }
+                                } else if (txt.indexOf('play') !== -1) {
+                                    isLooping = true;
+                                    runContinuousLoop();
+                                }
+                            });
+                        });
+
+                        function runContinuousLoop() {
+                            if (!isLooping) return;
+                            if (!pDoc.contains(gd)) return; // Stop gracefully if unmounted
+
+                            Plotly.animate(gd, null, {
+                                fromcurrent: false,
+                                mode: 'immediate',
+                                frame: { duration: 80, redraw: false },
+                                transition: { duration: 0 }
+                            }).then(function() {
+                                if (isLooping && pDoc.contains(gd)) {
+                                    // Seamlessly restart next cycle immediately
+                                    requestAnimationFrame(runContinuousLoop);
+                                }
+                            }).catch(function() {
+                                // Paused or interrupted
+                            });
+                        }
+
+                        // Auto-start continuous animation loop immediately on load
+                        runContinuousLoop();
+                    }
+
+                    if (document.readyState === 'loading') {
+                        document.addEventListener('DOMContentLoaded', setupContinuousTelemetry);
+                    } else {
+                        setupContinuousTelemetry();
+                    }
+                })();
+                </script>
+                """
+                _st_components.html(continuous_loop_js, height=0)
 
     # =========================================================================
     # SECTION 3: RISK ANALYSIS
@@ -1320,28 +2567,43 @@ Review mathematically optimized recovery options and record human sign-off into 
         max_risk = max([float(r.get("risk_score", 0.0) or 0.0) for r in risk_findings], default=0.0)
         avg_risk = sum([float(r.get("risk_score", 0.0) or 0.0) for r in risk_findings]) / max(total_audited, 1)
 
-        col_r1, col_r2, col_r3, col_r4 = st.columns(4)
-        with col_r1:
-            st.markdown(
-                render_kpi_card("Audited Assets", f"{total_audited}", "🔬", "kpi-card-glow-sky", "Upstream nodes evaluated", "#38BDF8"),
-                unsafe_allow_html=True,
+        risk_kpi_html = (
+            '<div class="kpi-grid">'
+            + render_kpi_card(
+                "Audited Assets",
+                f"{total_audited}",
+                "🔬",
+                "kpi-card-glow-sky",
+                "Upstream supply chain dependencies evaluated across all network tiers.",
+                "#38BDF8",
             )
-        with col_r2:
-            st.markdown(
-                render_kpi_card("Shared Bottlenecks", f"{shared_count}", "⚠️", "kpi-card-glow-rose" if shared_count > 0 else "kpi-card-glow-teal", "Affecting ≥2 suppliers", "#FB7185" if shared_count > 0 else "#2DD4BF"),
-                unsafe_allow_html=True,
+            + render_kpi_card(
+                "Shared Bottlenecks",
+                f"{shared_count}",
+                "⚠️",
+                "kpi-card-glow-rose" if shared_count > 0 else "kpi-card-glow-teal",
+                "Shared choke-points feeding multiple independent downstream suppliers.",
+                "#FB7185" if shared_count > 0 else "#2DD4BF",
             )
-        with col_r3:
-            st.markdown(
-                render_kpi_card("Peak Risk Score", f"{max_risk:.1f}/100", "⚡", "kpi-card-glow-amber", "Worst-case vulnerability", "#FBBF24"),
-                unsafe_allow_html=True,
+            + render_kpi_card(
+                "Peak Risk Score",
+                f"{max_risk:.1f}/100",
+                "⚡",
+                "kpi-card-glow-amber",
+                "Highest single vulnerability score detected across all dependency components.",
+                "#FBBF24",
             )
-        with col_r4:
-            st.markdown(
-                render_kpi_card("Average Risk", f"{avg_risk:.1f}/100", "📊", "kpi-card-glow-teal", "Network exposure index", "#2DD4BF"),
-                unsafe_allow_html=True,
+            + render_kpi_card(
+                "Average Risk",
+                f"{avg_risk:.1f}/100",
+                "📊",
+                "kpi-card-glow-teal",
+                "Composite vulnerability benchmark representing overall network risk exposure.",
+                "#2DD4BF",
             )
-
+            + '</div>'
+        )
+        st.markdown(risk_kpi_html, unsafe_allow_html=True)
         st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
         tab_shared, tab_all_risks = st.tabs(["Shared Dependencies Only (SPOF)", "All Dependency Findings"])
@@ -1416,54 +2678,191 @@ Review mathematically optimized recovery options and record human sign-off into 
         actions = sim_result.get("recommended_actions") or sim_result.get("recommended_next_actions") or []
         entity_details = sim_result.get("entity_impact_details", [])
 
-        # 4 Outage KPI Cards
-        o_col1, o_col2, o_col3, o_col4 = st.columns(4)
-        with o_col1:
-            st.markdown(
-                render_kpi_card("Failed Facility", f"{selected_failed_node}", "💥", "kpi-card-glow-rose", sim_result.get("disruption_type", "Operational Outage"), "#FB7185"),
-                unsafe_allow_html=True,
-            )
-        with o_col2:
-            sev_color = {
-                "Critical": "#FB7185",
-                "High": "#FBBF24",
-                "Medium": "#FDE047",
-                "Low": "#34D399",
-            }.get(impact_level, "#FDE047")
-            st.markdown(
-                render_kpi_card("Severity Tier", f"{impact_level.upper()}", "⚡", "kpi-card-glow-amber", "Blast radius classification", sev_color),
-                unsafe_allow_html=True,
-            )
-        with o_col3:
-            st.markdown(
-                render_kpi_card("Direct Capacity Severed", direct_cap_str, "📉", "kpi-card-glow-cyan", "Immediate throughput lost", "#38BDF8"),
-                unsafe_allow_html=True,
-            )
-        with o_col4:
-            st.markdown(
-                render_kpi_card("Downstream Entities", f"{affected_count} Entities", "🏢", "kpi-card-glow-teal", "Total facilities affected", "#2DD4BF"),
-                unsafe_allow_html=True,
-            )
+        # Determine dynamic severity styling based on topological impact level
+        sev_color_map = {
+            "Critical": "#FB7185",  # Rose/Red
+            "High": "#FBBF24",      # Amber
+            "Medium": "#38BDF8",    # Cyan/Sky
+            "Low": "#34D399",       # Emerald/Green
+        }
+        sev_glow_map = {
+            "Critical": "kpi-card-glow-rose",
+            "High": "kpi-card-glow-amber",
+            "Medium": "kpi-card-glow-sky",
+            "Low": "kpi-card-glow-emerald",
+        }
+        sev_color = sev_color_map.get(impact_level, "#FBBF24")
+        sev_glow = sev_glow_map.get(impact_level, "kpi-card-glow-amber")
 
+        # 4 Outage KPI Cards (Equal-width 4-column CSS grid on desktop with complete descriptions)
+        disrupt_kpi_html = (
+            '<div class="kpi-grid">'
+            + render_kpi_card(
+                "Failed Facility",
+                f"{selected_failed_node}",
+                "💥",
+                "kpi-card-glow-rose",
+                f"Primary shock origin entity: {sim_result.get('disruption_type', 'Operational Outage')}.",
+                "#FB7185",
+            )
+            + render_kpi_card(
+                "Severity Tier",
+                f"{impact_level.upper()}",
+                "⚡",
+                sev_glow,
+                "Topological blast radius severity classification across dependency routes.",
+                sev_color,
+            )
+            + render_kpi_card(
+                "Direct Capacity Severed",
+                direct_cap_str,
+                "📉",
+                "kpi-card-glow-cyan",
+                "Immediate rated production throughput unavailable due to primary shock.",
+                "#38BDF8",
+            )
+            + render_kpi_card(
+                "Downstream Entities",
+                f"{affected_count} Entities",
+                "🏢",
+                "kpi-card-glow-teal",
+                "Total downstream production and distribution facilities facing disruptions.",
+                "#2DD4BF",
+            )
+            + '</div>'
+        )
+        st.markdown(disrupt_kpi_html, unsafe_allow_html=True)
         st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
-        # Visual Propagation Cascade
-        mat_count = len(materials)
-        cascade_html = (
-            f'<div style="background:#0D1527; border:1px solid #1E293B; border-radius:10px; padding:14px 18px; margin-bottom:16px;">'
-            f'<div style="font-size:0.72rem; color:#94A3B8; text-transform:uppercase; letter-spacing:0.06em; font-weight:700; margin-bottom:8px;">'
-            f'DISRUPTION SHOCK PROPAGATION CASCADE'
-            f'</div>'
-            f'<div style="display:flex; align-items:center; flex-wrap:wrap; gap:10px; font-size:0.84rem;">'
-            f'<span style="background:rgba(244,63,94,0.18); color:#FB7185; border:1px solid rgba(244,63,94,0.4); padding:4px 12px; border-radius:16px; font-weight:700;">💥 ROOT OUTAGE: {selected_failed_node}</span>'
-            f'<span style="color:#64748B; font-weight:700;">&rarr;</span>'
-            f'<span style="background:rgba(245,158,11,0.18); color:#FBBF24; border:1px solid rgba(245,158,11,0.4); padding:4px 12px; border-radius:16px; font-weight:700;">⚡ BLAST RADIUS: {affected_count} Downstream Nodes</span>'
-            f'<span style="color:#64748B; font-weight:700;">&rarr;</span>'
-            f'<span style="background:rgba(56,189,248,0.18); color:#38BDF8; border:1px solid rgba(56,189,248,0.4); padding:4px 12px; border-radius:16px; font-weight:700;">📦 COMMODITIES: {mat_count} Jeopardized</span>'
-            f'</div>'
-            f'</div>'
+        # Feature 3: Disruption Propagation Impact Summary Card
+        st.markdown(render_disruption_propagation_summary(sim_result, graph), unsafe_allow_html=True)
+
+        st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
+
+        # Feature 3: Live Disruption Propagation Animation Canvas
+        prop_c1, prop_c2 = st.columns([7, 5], vertical_alignment="center")
+        with prop_c1:
+            st.markdown(
+                """
+                <div style="display:flex; align-items:center; gap:8px; padding:2px 0;">
+                  <span class="telemetry-pill telemetry-fallback" style="font-size:0.75rem; padding:3px 10px;">
+                    <span class="telemetry-pulse"></span> SHOCK PROPAGATION FLOW
+                  </span>
+                  <span style="font-size:0.80rem; color:#94A3B8;">Multi-hop topological shockwave cascade</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with prop_c2:
+            enable_prop_animations = st.toggle(
+                "Live Shock Propagation Telemetry",
+                value=True,
+                help="Animates amber/crimson shock signals along severed corridors and expanding origin radar wave.",
+                key="toggle_propagation_animations",
+            )
+
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+        fig_prop = create_disruption_propagation_figure(
+            graph=graph,
+            simulation_result=sim_result,
+            selected_entity=selected_failed_node,
+            title=f"⚡ Live Propagation Flow: {selected_failed_node} Shockwave",
+            animate=enable_prop_animations,
         )
-        st.markdown(cascade_html, unsafe_allow_html=True)
+        st.plotly_chart(fig_prop, use_container_width=True, config={"displayModeBar": "hover", "displaylogo": False})
+
+        if enable_prop_animations:
+            import streamlit.components.v1 as _st_components
+            prop_loop_js = """
+            <script>
+            (function() {
+                var isLooping = true;
+                var retryCount = 0;
+                var maxRetries = 50;
+
+                function getParentDoc() {
+                    try { return window.parent.document; } catch(e) { return null; }
+                }
+
+                function isReducedMotion() {
+                    try {
+                        return window.parent.matchMedia('(prefers-reduced-motion: reduce)').matches;
+                    } catch(e) { return false; }
+                }
+
+                if (isReducedMotion()) { return; }
+
+                function setupPropagationTelemetry() {
+                    var pDoc = getParentDoc();
+                    if (!pDoc) return;
+                    var plots = pDoc.querySelectorAll('.js-plotly-plot');
+                    var gd = plots.length > 0 ? plots[plots.length - 1] : null;
+                    var Plotly = window.parent.Plotly || (window.parent.window && window.parent.window.Plotly);
+
+                    if (!gd || !Plotly || !gd._fullLayout) {
+                        if (retryCount++ < maxRetries) {
+                            setTimeout(setupPropagationTelemetry, 100);
+                        }
+                        return;
+                    }
+
+                    var buttons = gd.querySelectorAll('.updatemenu-button');
+                    buttons.forEach(function(btn) {
+                        if (btn.dataset.nexusPropBound) return;
+                        btn.dataset.nexusPropBound = 'true';
+
+                        btn.addEventListener('click', function() {
+                            var txt = (btn.textContent || '').toLowerCase();
+                            if (txt.indexOf('pause') !== -1) {
+                                isLooping = false;
+                                try { Plotly.animate(gd, [null], {mode: 'immediate'}); } catch(e){}
+                            } else if (txt.indexOf('replay') !== -1) {
+                                isLooping = true;
+                                try {
+                                    Plotly.animate(gd, ['frame_0'], {fromcurrent: false, mode: 'immediate'}).then(function() {
+                                        runPropagationLoop();
+                                    });
+                                } catch(e) {
+                                    runPropagationLoop();
+                                }
+                            } else if (txt.indexOf('play') !== -1) {
+                                isLooping = true;
+                                runPropagationLoop();
+                            }
+                        });
+                    });
+
+                    function runPropagationLoop() {
+                        if (!isLooping) return;
+                        if (!pDoc.contains(gd)) return;
+
+                        Plotly.animate(gd, null, {
+                            fromcurrent: false,
+                            mode: 'immediate',
+                            frame: { duration: 80, redraw: false },
+                            transition: { duration: 0 }
+                        }).then(function() {
+                            if (isLooping && pDoc.contains(gd)) {
+                                requestAnimationFrame(runPropagationLoop);
+                            }
+                        }).catch(function() {});
+                    }
+
+                    runPropagationLoop();
+                }
+
+                if (document.readyState === 'loading') {
+                    document.addEventListener('DOMContentLoaded', setupPropagationTelemetry);
+                } else {
+                    setupPropagationTelemetry();
+                }
+            })();
+            </script>
+            """
+            _st_components.html(prop_loop_js, height=0)
+
+        st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
         d_col1, d_col2 = st.columns([1, 1])
         with d_col1:
@@ -1553,29 +2952,44 @@ Review mathematically optimized recovery options and record human sign-off into 
             unsafe_allow_html=True,
         )
 
-        # Financial ROI Summary
-        f_row = st.columns(4)
-        with f_row[0]:
-            st.markdown(
-                render_kpi_card("Inaction Gross Loss", gross_loss_disp, "💸", "kpi-card-glow-rose", "Unmitigated shock impact", "#FB7185" if is_unquantified else "#F8FAFC"),
-                unsafe_allow_html=True,
+        # Financial ROI Summary (Equal-width 4-column CSS grid on desktop with complete descriptions)
+        recovery_kpi_html = (
+            '<div class="kpi-grid">'
+            + render_kpi_card(
+                "Inaction Gross Loss",
+                gross_loss_disp,
+                "💸",
+                "kpi-card-glow-rose",
+                "Total unmitigated financial revenue loss projected across the network.",
+                "#FB7185" if is_unquantified else "#F8FAFC",
             )
-        with f_row[1]:
-            st.markdown(
-                render_kpi_card("Plan Expenditure", rec_cost_disp, "💳", "kpi-card-glow-cyan", "Required capital allocation", "#38BDF8"),
-                unsafe_allow_html=True,
+            + render_kpi_card(
+                "Plan Expenditure",
+                rec_cost_disp,
+                "💳",
+                "kpi-card-glow-cyan",
+                "Capital required to execute optimized supplier allocations and freight.",
+                "#38BDF8",
             )
-        with f_row[2]:
-            st.markdown(
-                render_kpi_card("Net Capital Saved", est_savings_disp, "💎", "kpi-card-glow-emerald", "Capital preserved by intervention", "#34D399" if not is_unquantified else "#FB7185"),
-                unsafe_allow_html=True,
+            + render_kpi_card(
+                "Net Capital Saved",
+                est_savings_disp,
+                "💎",
+                "kpi-card-glow-emerald",
+                "Net financial capital preserved through active recovery plan intervention.",
+                "#34D399" if not is_unquantified else "#FB7185",
             )
-        with f_row[3]:
-            st.markdown(
-                render_kpi_card("Residual Risk", residual_loss_disp, "⚠️", "kpi-card-glow-amber", "Remaining unmitigated exposure", "#FBBF24" if not is_unquantified else "#FB7185"),
-                unsafe_allow_html=True,
+            + render_kpi_card(
+                "Residual Risk",
+                residual_loss_disp,
+                "⚠️",
+                "kpi-card-glow-amber",
+                "Remaining financial revenue exposure after executing all recovery actions.",
+                "#FBBF24" if not is_unquantified else "#FB7185",
             )
-
+            + '</div>'
+        )
+        st.markdown(recovery_kpi_html, unsafe_allow_html=True)
         st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
         rec_ids = financial_result.get("recommended_option_ids", [])
@@ -1822,42 +3236,100 @@ Strategy: <span style="color:#2DD4BF;">{rec_display_str}</span>
                 height=70,
             )
 
+        # Backend Role Authorization Enforcement
+        is_viewer = (curr_u_role == "VIEWER")
+        if is_viewer:
+            st.markdown(
+                '''
+                <div style="background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.25); border-radius:8px; padding:10px 14px; margin-bottom:12px; color:#38BDF8; font-size:0.80rem;">
+                  👁️ <b>READ-ONLY ACCESS:</b> You are signed in with the <b>VIEWER</b> role. You can inspect all decision narratives, simulations, and financial audits, but you do not have permission to authorize capital allocations or record governance decisions.
+                </div>
+                ''',
+                unsafe_allow_html=True,
+            )
+
         btn_col1, btn_col2, _ = st.columns([1, 1, 2])
         with btn_col1:
-            approve_clicked = st.button("Approve Recommendation", key="btn_approve_recommendation", use_container_width=True)
+            approve_clicked = st.button(
+                "Approve Recommendation",
+                key="btn_approve_recommendation",
+                use_container_width=True,
+                disabled=is_viewer,
+                help="Requires ADMIN or REVIEWER role." if is_viewer else "Records official approval."
+            )
         with btn_col2:
-            reject_clicked = st.button("Reject Recommendation", key="btn_reject_recommendation", use_container_width=True)
+            reject_clicked = st.button(
+                "Reject Recommendation",
+                key="btn_reject_recommendation",
+                use_container_width=True,
+                disabled=is_viewer,
+                help="Requires ADMIN or REVIEWER role." if is_viewer else "Records official rejection."
+            )
 
         if approve_clicked:
-            if not active_run_id:
+            # Backend Enforcement 1: Re-validate active session & account status
+            if not auth_manager.is_user_active(curr_u_name):
+                st.error("Authentication error: Your account is deactivated. Access revoked.")
+            # Backend Enforcement 2: Role Authorization (Viewer cannot approve)
+            elif not auth_manager.can_approve_or_reject(curr_u_role):
+                st.error(f"Unauthorized: User '{curr_u_name}' with role '{curr_u_role}' is not permitted to approve recovery plans.")
+            elif not active_run_id:
                 st.error("No active simulation run ID found to approve.")
             else:
+                official_rev_label = f"{curr_u_name} ({curr_u_role})"
+                if reviewer_label_input and reviewer_label_input != "Prototype Reviewer (Supply Chain Risk Analyst)":
+                    official_rev_label = f"{official_rev_label} - {reviewer_label_input}"
+
                 success, msg, _ = audit_logger.record_decision_event(
                     run_id=active_run_id,
                     decision_type="RECOMMENDATION_APPROVED",
-                    reviewer_label=reviewer_label_input,
+                    reviewer_label=official_rev_label,
                     justification=justification_input,
                 )
                 if success:
                     st.success(f"{msg}")
+                    auth_manager._record_audit_event(
+                        event_type="AUTH_DECISION_APPROVED",
+                        actor_username=curr_u_name,
+                        target_username=selected_failed_node,
+                        details={"run_id": active_run_id, "justification_length": len(justification_input or "")},
+                    )
+                    time.sleep(1)
                     st.rerun()
                 else:
                     st.error(f"{msg}")
 
         if reject_clicked:
-            if not active_run_id:
+            # Backend Enforcement 1: Re-validate active session & account status
+            if not auth_manager.is_user_active(curr_u_name):
+                st.error("Authentication error: Your account is deactivated. Access revoked.")
+            # Backend Enforcement 2: Role Authorization (Viewer cannot reject)
+            elif not auth_manager.can_approve_or_reject(curr_u_role):
+                st.error(f"Unauthorized: User '{curr_u_name}' with role '{curr_u_role}' is not permitted to reject recovery plans.")
+            elif not active_run_id:
                 st.error("No active simulation run ID found to reject.")
             elif not justification_input or not justification_input.strip():
                 st.error("Rejection blocked: Specific justification is required to record a rejection recommendation.")
             else:
+                official_rev_label = f"{curr_u_name} ({curr_u_role})"
+                if reviewer_label_input and reviewer_label_input != "Prototype Reviewer (Supply Chain Risk Analyst)":
+                    official_rev_label = f"{official_rev_label} - {reviewer_label_input}"
+
                 success, msg, _ = audit_logger.record_decision_event(
                     run_id=active_run_id,
                     decision_type="RECOMMENDATION_REJECTED",
-                    reviewer_label=reviewer_label_input,
+                    reviewer_label=official_rev_label,
                     justification=justification_input,
                 )
                 if success:
                     st.warning(f"{msg}")
+                    auth_manager._record_audit_event(
+                        event_type="AUTH_DECISION_REJECTED",
+                        actor_username=curr_u_name,
+                        target_username=selected_failed_node,
+                        details={"run_id": active_run_id, "justification_length": len(justification_input or "")},
+                    )
+                    time.sleep(1)
                     st.rerun()
                 else:
                     st.error(f"{msg}")
@@ -1985,6 +3457,148 @@ Strategy: <span style="color:#2DD4BF;">{rec_display_str}</span>
                     st.dataframe(pd.DataFrame(events_display), use_container_width=True, hide_index=True)
             else:
                 st.info("No audit events recorded in the append-only ledger yet.")
+
+    # =========================================================================
+    # SECTION 8: USER MANAGEMENT & ROLE-BASED ACCESS CONTROL (ADMIN ONLY)
+    # =========================================================================
+    elif "8. 👥" in selected_nav:
+        # Strict backend authorization check
+        if curr_u_role != "ADMIN":
+            st.error("Access Denied: Only users with the 'ADMIN' role can access User Management.")
+            st.stop()
+
+        st.markdown(
+            '''
+            <div class="section-header-banner">
+              <div>
+                <div class="section-header-title">👥 Enterprise User Management & Role-Based Access Control</div>
+                <div class="section-header-desc">
+                  Provision new Reviewer and Viewer accounts, manage account status, perform administrative password resets, and inspect security audit events.
+                </div>
+              </div>
+            </div>
+            ''',
+            unsafe_allow_html=True,
+        )
+
+        tab_accounts, tab_create, tab_sec_audit = st.tabs([
+            "📋 Registered Accounts",
+            "➕ Provision New User",
+            "🛡️ Security Audit Log"
+        ])
+
+        with tab_create:
+            st.markdown("#### Provision New Enterprise Personnel Account")
+            st.caption("Create a new user account with strict role assignment. Public self-registration is permanently prohibited.")
+            with st.form("form_create_new_enterprise_user"):
+                new_uname = st.text_input("Username:", placeholder="e.g. jsmith", help="Alphanumeric, at least 3 characters.")
+                new_uemail = st.text_input("Email Address:", placeholder="e.g. jsmith@enterprise.com")
+                new_urole = st.selectbox("Assign User Role:", ["REVIEWER", "VIEWER"])
+                new_upw = st.text_input("Initial Password:", type="password", help="At least 8 characters with letters and numbers.")
+                sub_create_u = st.form_submit_button("Provision User Account", key="btn_sub_create_user", use_container_width=True)
+                if sub_create_u:
+                    ok_cu, msg_cu, _ = auth_manager.create_user(curr_u_name, new_uname, new_uemail, new_upw, new_urole)
+                    if ok_cu:
+                        st.success(msg_cu)
+                    else:
+                        st.error(msg_cu)
+
+        with tab_accounts:
+            all_users = auth_manager.list_users(curr_u_name)
+            st.markdown(f"**Total Enterprise Users Registered:** `{len(all_users)}`")
+
+            user_table_data = []
+            for u in all_users:
+                user_table_data.append({
+                    "Username": u["username"],
+                    "Email Address": u["email"],
+                    "Assigned Role": u["role"],
+                    "Status": "ACTIVE" if u["is_active"] else "DEACTIVATED",
+                    "Created (UTC)": u["created_at_utc"][:19].replace("T", " ") if u["created_at_utc"] else "Unknown",
+                    "Last Login (UTC)": u["last_login_utc"][:19].replace("T", " ") if u["last_login_utc"] else "Never",
+                })
+            st.dataframe(pd.DataFrame(user_table_data), use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            st.markdown("#### Account Status & Credential Administration")
+            other_users = [u["username"] for u in all_users if u["username"].lower() != curr_u_name.lower()]
+
+            if not other_users:
+                st.info("No secondary accounts exist to administer yet. Use the 'Provision New User' tab to add Reviewers or Viewers.")
+            else:
+                target_sel = st.selectbox("Select Target User Account to Administer:", other_users, key="sel_target_admin_user")
+                target_obj = next((u for u in all_users if u["username"] == target_sel), None)
+
+                if target_obj:
+                    col_m1, col_m2 = st.columns(2)
+                    with col_m1:
+                        st.markdown(f"**Target User:** `{target_obj['username']}` ({target_obj['email']})")
+                        st.markdown(f"**Current Status:** `{'ACTIVE' if target_obj['is_active'] else 'DEACTIVATED'}` | **Current Role:** `{target_obj['role']}`")
+
+                        # Activation / Deactivation Button
+                        if target_obj["is_active"]:
+                            if st.button(f"🚫 Deactivate '{target_sel}'", key=f"btn_deact_{target_sel}"):
+                                ok_st, msg_st = auth_manager.set_account_status(curr_u_name, target_sel, False)
+                                if ok_st:
+                                    st.success(msg_st)
+                                    time.sleep(0.5)
+                                    st.rerun()
+                                else:
+                                    st.error(msg_st)
+                        else:
+                            if st.button(f"✅ Activate '{target_sel}'", key=f"btn_act_{target_sel}"):
+                                ok_st, msg_st = auth_manager.set_account_status(curr_u_name, target_sel, True)
+                                if ok_st:
+                                    st.success(msg_st)
+                                    time.sleep(0.5)
+                                    st.rerun()
+                                else:
+                                    st.error(msg_st)
+
+                        # Role Change
+                        role_options = ["REVIEWER", "VIEWER", "ADMIN"]
+                        new_r_idx = role_options.index(target_obj["role"]) if target_obj["role"] in role_options else 0
+                        chosen_new_role = st.selectbox("Re-assign Role:", role_options, index=new_r_idx, key=f"role_sel_{target_sel}")
+                        if st.button(f"Apply Role Change to '{chosen_new_role}'", key=f"btn_chg_role_{target_sel}"):
+                            ok_rc, msg_rc = auth_manager.change_role(curr_u_name, target_sel, chosen_new_role)
+                            if ok_rc:
+                                st.success(msg_rc)
+                                time.sleep(0.5)
+                                st.rerun()
+                            else:
+                                st.error(msg_rc)
+
+                    with col_m2:
+                        st.markdown("**Administrative Password Reset**")
+                        st.caption("Securely sets a new password. The user will be required to authenticate with this new credential.")
+                        with st.form(f"form_admin_reset_{target_sel}"):
+                            new_reset_pw = st.text_input(f"New Password for {target_sel}:", type="password", help="At least 8 chars with letters & numbers.")
+                            sub_reset = st.form_submit_button("Reset Password")
+                            if sub_reset:
+                                ok_rp, msg_rp = auth_manager.reset_password(curr_u_name, target_sel, new_reset_pw)
+                                if ok_rp:
+                                    st.success(msg_rp)
+                                else:
+                                    st.error(msg_rp)
+
+        with tab_sec_audit:
+            st.markdown("#### Security & Access Control Audit Log")
+            st.caption("Immutable append-only record of all login events, account creation, role assignments, and credential operations.")
+            auth_events = auth_manager.get_auth_audit_events(curr_u_name, limit=100)
+            if not auth_events:
+                st.info("No security audit events recorded yet.")
+            else:
+                sec_event_rows = []
+                for ev in auth_events:
+                    sec_event_rows.append({
+                        "Event ID": ev["event_id"],
+                        "Timestamp (UTC)": ev["timestamp_utc"][:19].replace("T", " ") if ev["timestamp_utc"] else "",
+                        "Event Type": ev["event_type"],
+                        "Actor": ev["actor_username"],
+                        "Target": ev["target_username"] or "-",
+                        "Details": json.dumps(ev["details"]),
+                    })
+                st.dataframe(pd.DataFrame(sec_event_rows), use_container_width=True, hide_index=True)
 
 
 def run_cli_fallback(args: argparse.Namespace) -> None:
