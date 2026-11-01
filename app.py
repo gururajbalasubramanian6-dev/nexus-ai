@@ -88,6 +88,9 @@ from agents.dashboard_components import (
     safe_format_number,
 )
 
+# Audit Logging & Governance Import
+from agents.audit_logger import AuditLogger
+
 
 def run_streamlit_app() -> None:
     """Renders the comprehensive Streamlit interactive dashboard."""
@@ -513,6 +516,12 @@ def run_streamlit_app() -> None:
         value=True,
     )
 
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📜 4. Governance & Audit")
+    if st.sidebar.button("🔁 Re-run Simulation (New Audit Record)", help="Starts an intentional new simulation run with identical parameters, minting a distinct Run ID and audit record."):
+        st.session_state["force_new_run"] = True
+        st.session_state["audit_justification_field"] = ""
+
     # =========================================================================
     # Run Agent Pipelines
     # =========================================================================
@@ -567,6 +576,55 @@ def run_streamlit_app() -> None:
         financial_result=financial_result,
         risk_findings=risk_findings,
     )
+
+    # 5. Audit Logging & State Deduplication
+    audit_logger = AuditLogger()
+    sim_fingerprint = f"{selected_failed_node}|{passed_disruption_type}|{unit_loss_input:.1f}|{budget_input:.1f}|{max_lead_time_input}|{allow_multi_option}"
+    force_new = st.session_state.get("force_new_run", False)
+
+    if force_new or st.session_state.get("active_sim_fingerprint") != sim_fingerprint:
+        if force_new:
+            st.session_state["audit_justification_field"] = ""
+        active_run_id = audit_logger.record_simulation_run(
+            scenario_entity=selected_failed_node,
+            disruption_type=sim_result.get("disruption_type", "Operational Outage"),
+            scenario_params={
+                "failed_node": selected_failed_node,
+                "disruption_type": passed_disruption_type,
+                "unit_loss": unit_loss_input,
+                "budget": budget_input,
+                "max_lead_time": max_lead_time_input,
+                "allow_multi_option": allow_multi_option,
+            },
+            sim_result=sim_result,
+            financial_result=financial_result,
+            decision_exp=decision_exp,
+            execution_channel="STREAMLIT",
+        )
+        st.session_state["active_sim_fingerprint"] = sim_fingerprint
+        st.session_state["active_run_id"] = active_run_id
+        st.session_state["force_new_run"] = False
+    else:
+        active_run_id = st.session_state.get("active_run_id")
+        if not active_run_id:
+            active_run_id = audit_logger.record_simulation_run(
+                scenario_entity=selected_failed_node,
+                disruption_type=sim_result.get("disruption_type", "Operational Outage"),
+                scenario_params={
+                    "failed_node": selected_failed_node,
+                    "disruption_type": passed_disruption_type,
+                    "unit_loss": unit_loss_input,
+                    "budget": budget_input,
+                    "max_lead_time": max_lead_time_input,
+                    "allow_multi_option": allow_multi_option,
+                },
+                sim_result=sim_result,
+                financial_result=financial_result,
+                decision_exp=decision_exp,
+                execution_channel="STREAMLIT",
+            )
+            st.session_state["active_sim_fingerprint"] = sim_fingerprint
+            st.session_state["active_run_id"] = active_run_id
 
     # =========================================================================
     # Header & Overview
@@ -974,6 +1032,175 @@ def run_streamlit_app() -> None:
         mime="text/markdown",
     )
 
+    st.markdown("---")
+
+    # =========================================================================
+    # SECTION G: AUDIT TRAIL & HUMAN GOVERNANCE
+    # =========================================================================
+    st.markdown("### 📜 Section G: Audit Trail & Human Governance")
+    st.caption(
+        "Immutable append-only ledger tracking all simulation executions, financial recovery "
+        "recommendations, and human advisory sign-offs."
+    )
+
+    active_run = audit_logger.get_run_by_id(active_run_id) if active_run_id else None
+    current_status = active_run.get("current_decision_status", "PENDING_REVIEW") if active_run else "PENDING_REVIEW"
+    created_time = active_run.get("created_at_utc", "Unknown") if active_run else "Unknown"
+
+    status_pill_class = {
+        "APPROVED": "badge-low",
+        "REJECTED": "badge-critical",
+        "PENDING_REVIEW": "badge-high",
+        "AUTO_RECOMMENDED": "badge-low",
+    }.get(current_status, "badge-medium")
+
+    # Active Run Header Card
+    st.markdown(
+        f"""
+        <div style="background:#1E293B;border:1px solid #334155;border-radius:10px;padding:14px 18px;margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+            <div>
+              <span style="color:#94A3B8;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;">Active Run ID:</span>
+              <span style="color:#F8FAFC;font-weight:700;font-family:monospace;font-size:0.95rem;margin-left:6px;">{active_run_id}</span>
+              &nbsp;&nbsp;|&nbsp;&nbsp;
+              <span style="color:#94A3B8;font-size:0.8rem;">Timestamp (UTC):</span>
+              <span style="color:#CBD5E1;font-family:monospace;font-size:0.85rem;margin-left:4px;">{created_time}</span>
+            </div>
+            <div>
+              <span style="color:#94A3B8;font-size:0.8rem;margin-right:6px;">Current Status:</span>
+              <span class="{status_pill_class}">{current_status}</span>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Prototype Scope Advisory Notice
+    st.markdown(
+        """
+        <div style="background:#0F172A;border-left:4px solid #3B82F6;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
+          <span style="font-weight:700;color:#60A5FA;">⚠️ PROTOTYPE GOVERNANCE NOTICE:</span>
+          <span style="color:#94A3B8;font-size:0.88rem;">
+            This control panel captures advisory human oversight within the Nexus-AI compliance log.
+            Recording a decision creates an immutable event in the local SQLite audit ledger, but does <b>NOT</b> execute
+            live procurement, place binding supplier purchase orders, authorize bank funds, or reroute freight.
+          </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Human Decision Input Fields
+    gov_col1, gov_col2 = st.columns([1, 1])
+    with gov_col1:
+        reviewer_label_input = st.text_input(
+            "Reviewer Label / Prototype Role:",
+            value="Prototype Reviewer (Supply Chain Risk Analyst)",
+            help="Designation recorded in the immutable audit event.",
+            key="audit_reviewer_label_field",
+        )
+    with gov_col2:
+        justification_input = st.text_area(
+            "Governance Justification / Review Notes:",
+            placeholder="Enter rationale for approval, or mandatory justification for rejection...",
+            help="Mandatory for rejection, recommended for approval.",
+            key="audit_justification_field",
+            height=70,
+        )
+
+    btn_col1, btn_col2, _ = st.columns([1, 1, 2])
+    with btn_col1:
+        approve_clicked = st.button("Approve Recommendation", key="btn_approve_recommendation", use_container_width=True)
+    with btn_col2:
+        reject_clicked = st.button("Reject Recommendation", key="btn_reject_recommendation", use_container_width=True)
+
+    if approve_clicked:
+        if not active_run_id:
+            st.error("No active simulation run ID found to approve.")
+        else:
+            success, msg, _ = audit_logger.record_decision_event(
+                run_id=active_run_id,
+                decision_type="RECOMMENDATION_APPROVED",
+                reviewer_label=reviewer_label_input,
+                justification=justification_input,
+            )
+            if success:
+                st.success(f"{msg}")
+                st.rerun()
+            else:
+                st.error(f"{msg}")
+
+    if reject_clicked:
+        if not active_run_id:
+            st.error("No active simulation run ID found to reject.")
+        elif not justification_input or not justification_input.strip():
+            st.error("Rejection blocked: Specific justification is required to record a rejection recommendation.")
+        else:
+            success, msg, _ = audit_logger.record_decision_event(
+                run_id=active_run_id,
+                decision_type="RECOMMENDATION_REJECTED",
+                reviewer_label=reviewer_label_input,
+                justification=justification_input,
+            )
+            if success:
+                st.warning(f"{msg}")
+                st.rerun()
+            else:
+                st.error(f"{msg}")
+
+    # Historical Audit Explorer (Two Tabs)
+    st.markdown("#### 📋 Historical Audit Explorer")
+    audit_tabs = st.tabs([
+        "1. Simulation Runs (nexus_audit_runs)",
+        "2. Append-Only Event Ledger (nexus_audit_events)",
+    ])
+
+    with audit_tabs[0]:
+        runs_list = audit_logger.get_audit_runs(limit=50)
+        if runs_list:
+            runs_display = []
+            for r in runs_list:
+                b_loss = r["financial_baseline_loss"]
+                b_loss_str = f"${float(b_loss):,.2f}" if b_loss != "UNQUANTIFIED" else "UNQUANTIFIED"
+                p_cost = r["recovery_plan_cost"]
+                p_cost_str = f"${float(p_cost):,.2f}" if p_cost is not None else "UNQUANTIFIED"
+                sav = r["estimated_net_savings"]
+                sav_str = f"${float(sav):,.2f}" if sav != "UNQUANTIFIED" else "UNQUANTIFIED"
+
+                runs_display.append({
+                    "Run ID": r["run_id"],
+                    "Created (UTC)": r["created_at_utc"][:19] + "Z",
+                    "Entity": r["scenario_entity"],
+                    "Disruption Type": r["disruption_type"],
+                    "Severity": r["impact_level"],
+                    "Baseline Loss": b_loss_str,
+                    "Plan Cost": p_cost_str,
+                    "Net Savings": sav_str,
+                    "Decision Status": r["current_decision_status"],
+                    "Human Approval Mandated": "YES" if r["requires_human_approval"] else "NO",
+                })
+            st.dataframe(pd.DataFrame(runs_display), use_container_width=True)
+        else:
+            st.info("No simulation runs recorded in the local audit database yet.")
+
+    with audit_tabs[1]:
+        events_list = audit_logger.get_audit_events(limit=100)
+        if events_list:
+            events_display = []
+            for e in events_list:
+                events_display.append({
+                    "Event ID": e["event_id"],
+                    "Run ID": e["run_id"],
+                    "Timestamp (UTC)": e["timestamp_utc"][:19] + "Z",
+                    "Event Type": e["event_type"],
+                    "Reviewer Label": e["reviewer_label"],
+                    "Justification / Rationale": e["justification"] or "(None)",
+                })
+            st.dataframe(pd.DataFrame(events_display), use_container_width=True)
+        else:
+            st.info("No audit events recorded in the append-only ledger yet.")
+
 
 def run_cli_fallback(args: argparse.Namespace) -> None:
     """CLI fallback runner when app.py is invoked directly as a Python script."""
@@ -1051,7 +1278,25 @@ def run_cli_fallback(args: argparse.Namespace) -> None:
     print("\n" + "=" * 70)
     print(exp["markdown_report"])
     print("=" * 70)
-    print("\n[Tip] To launch the full interactive web dashboard, run:")
+
+    # 6. Audit Logging in CLI
+    audit_logger = AuditLogger()
+    cli_run_id = audit_logger.record_simulation_run(
+        scenario_entity=failed_target,
+        disruption_type=sim_res.get("disruption_type", "Facility Outage"),
+        scenario_params={
+            "failed_node": failed_target,
+            "unit_loss": args.loss_per_unit,
+            "budget": args.budget,
+            "max_lead_time": args.max_lead_time,
+        },
+        sim_result=sim_res,
+        financial_result=fin_res,
+        decision_exp=exp,
+        execution_channel="CLI",
+    )
+    print(f"\n[Audit] Simulation recorded in nexus_audit_runs with Run ID: {cli_run_id}")
+    print("[Tip] To launch the full interactive web dashboard, run:")
     print("      streamlit run app.py\n")
 
 

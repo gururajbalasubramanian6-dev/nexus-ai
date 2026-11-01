@@ -13,6 +13,12 @@ __pycache__/
 supply_chain_graph.html
 *.log
 
+# SQLite Local Audit Database
+nexus_audit.db
+*.db
+*.sqlite
+*.sqlite3
+
 # Environment variables and secrets
 .env
 .env.*
