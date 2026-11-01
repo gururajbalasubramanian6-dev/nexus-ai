@@ -459,3 +459,32 @@ def test_broken_supply_corridors_and_recommended_actions_aliases():
     assert ["Raw Material Q", "Processor Y", "Supplier C"] in res_q["disrupted_paths"]
     assert res_q["recommended_actions"] == res_q["recommended_next_actions"]
     assert len(res_q["recommended_actions"]) >= 3
+
+
+def test_branching_aware_severity_classification():
+    """
+    Regression test verifying branching-aware severity classification:
+    1. Raw Material Q is a single linear unbranched corridor -> HIGH.
+    2. Processor X is a shared choke-point with 2 confirmed shortages -> CRITICAL.
+    3. Raw Material P cascades into >= 3 confirmed shortages -> CRITICAL.
+    4. Terminal supplier failures (Supplier A, Supplier B, Supplier C) retain safe LOW classification.
+    """
+    df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
+    graph = build_supply_chain_graph(df)
+
+    # 1. Raw Material Q -> HIGH
+    res_q = simulate_disruption(graph, failed_node="Raw Material Q")
+    assert res_q["impact_level"] == "High"
+
+    # 2. Processor X -> CRITICAL (shared choke-point with >= 2 confirmed shortages)
+    res_x = simulate_disruption(graph, failed_node="Processor X")
+    assert res_x["impact_level"] == "Critical"
+
+    # 3. Raw Material P -> CRITICAL (>= 3 confirmed shortages across tree)
+    res_p = simulate_disruption(graph, failed_node="Raw Material P")
+    assert res_p["impact_level"] == "Critical"
+
+    # 4. Terminal supplier failures retain safe LOW classification
+    for supplier in ["Supplier A", "Supplier B", "Supplier C"]:
+        res_sup = simulate_disruption(graph, failed_node=supplier)
+        assert res_sup["impact_level"] == "Low"

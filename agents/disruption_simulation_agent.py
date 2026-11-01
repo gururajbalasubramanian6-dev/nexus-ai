@@ -407,24 +407,24 @@ def _determine_impact_level(
     Transparent rule-based heuristic to assign an Impact Level.
 
     Heuristic Rules:
-    - Critical: Confirmed shortages >= 2, or shared chokepoint affecting >= 3 entities,
-      or very large direct capacity loss.
-    - High: Confirmed shortages == 1, or shared chokepoint affecting 2 entities,
-      or >= 3 potentially affected entities.
-    - Medium: 1 or 2 potentially affected entities with operational alternatives.
-    - Low: 0 downstream entities affected (terminal node) or single isolated link with alternatives.
+    - Critical: A shared choke-point with at least 2 confirmed shortages,
+      or at least 3 confirmed shortages across downstream paths.
+    - High: At least 1 confirmed shortage, or at least 2 affected downstream entities,
+      or a shared choke-point exists.
+    - Medium: 1 downstream entity potentially affected with operational fallback paths.
+    - Low: 0 downstream entities affected (terminal node).
 
     Note: These rules are explicit and heuristic; they are not scientifically certified predictions.
     """
     reasons: List[str] = []
 
-    if confirmed_shortages_count >= 2 or (is_shared_chokepoint and affected_entities_count >= 3):
+    if (is_shared_chokepoint and confirmed_shortages_count >= 2) or confirmed_shortages_count >= 3:
         level = "Critical"
         reasons.append(
             f"Severe multi-entity fallout: {confirmed_shortages_count} confirmed shortage(s) "
-            f"across {affected_entities_count} affected downstream nodes"
+            f"across branching downstream paths ({affected_entities_count} total affected nodes)"
         )
-    elif confirmed_shortages_count == 1 or affected_entities_count >= 3 or is_shared_chokepoint:
+    elif confirmed_shortages_count >= 1 or affected_entities_count >= 2 or is_shared_chokepoint:
         level = "High"
         reasons.append(
             f"Significant disruption: {confirmed_shortages_count} confirmed shortage(s), "
