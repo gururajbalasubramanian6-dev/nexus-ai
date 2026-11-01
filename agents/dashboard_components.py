@@ -33,16 +33,16 @@ from agents.financial_optimization_agent import (
 from agents.disruption_simulation_agent import get_financial_engine_payload
 
 
-# Status Colors for Resilience Graph
+# Modern Enterprise Status & Role Colors for Resilience Graph
 STATUS_COLORS: Dict[str, str] = {
-    "failed": "#D32F2F",                # Strong Red
-    "confirmed_shortage": "#C2185B",    # Crimson
-    "potentially_affected": "#F57C00",  # Amber/Orange
-    "unaffected_raw": "#FF8F00",        # Deep Amber
-    "unaffected_proc": "#0288D1",       # Light Blue
-    "unaffected_supp": "#2E7D32",       # Forest Green
-    "unaffected_fact": "#6A1B9A",       # Royal Purple
-    "unaffected_other": "#546E7A",      # Slate Grey
+    "failed": "#EF4444",                # High-Alert Red (Root shock failure)
+    "confirmed_shortage": "#F43F5E",    # Vivid Rose / Crimson (Confirmed downstream shortage)
+    "potentially_affected": "#F59E0B",  # Warning Amber / Orange (High-risk hub / potential shortage)
+    "unaffected_raw": "#06B6D4",        # Cyan (Raw Material - Healthy)
+    "unaffected_proc": "#38BDF8",       # Sky Blue (Processor - Healthy)
+    "unaffected_supp": "#10B981",       # Emerald (Supplier - Healthy)
+    "unaffected_fact": "#8B5CF6",       # Violet (Plant / Factory - Healthy)
+    "unaffected_other": "#64748B",      # Slate Grey (Other Entity - Healthy)
 }
 
 
@@ -172,28 +172,45 @@ def create_resilient_network_figure(
     Dynamically highlights disrupted nodes, confirmed shortages, potential shortages,
     and severed vs. operational transport routes.
     """
-    pos = compute_hierarchical_layout(graph)
     fig = go.Figure()
+    if graph.number_of_nodes() == 0:
+        fig.update_layout(
+            template="plotly_dark",
+            title=dict(text=f"<b>{title}</b>", font=dict(color="#F8FAFC")),
+            paper_bgcolor="#070B14",
+            plot_bgcolor="#0A101D",
+        )
+        return fig
 
-    # Identify broken edges from simulation
+    # 1. Compute and scale layout coordinates for presentation spacing
+    base_pos = compute_hierarchical_layout(graph)
+    SCALE_X = 1.6
+    SCALE_Y = 1.45
+    pos: Dict[str, Tuple[float, float]] = {
+        node: (coords[0] * SCALE_X, coords[1] * SCALE_Y)
+        for node, coords in base_pos.items()
+    }
+
+    # 2. Identify broken corridors from simulation
     failed_edges: Set[Tuple[str, str]] = set()
     failed_entity = simulation_result.get("failed_entity", "") if simulation_result else ""
 
     if simulation_result:
-        # If a node failed, all its outgoing and incoming edges are broken
         for u, v in graph.edges():
             if u == failed_entity or v == failed_entity:
                 failed_edges.add((u, v))
 
-        # Check explicit failed edge
         if " -> " in failed_entity:
-            # Parse route or edge string e.g. "Route (Supplier A -> Factory 1)"
             for u, v in graph.edges():
                 if f"{u} -> {v}" in failed_entity:
                     failed_edges.add((u, v))
 
-    # Step 1: Draw Directed Edges & Route Annotations
+    # 3. Process Corridors: Line segments, directed annotations & midpoints
     annotations = []
+    op_line_x: List[Optional[float]] = []
+    op_line_y: List[Optional[float]] = []
+    sev_line_x: List[Optional[float]] = []
+    sev_line_y: List[Optional[float]] = []
     mid_x, mid_y, mid_text, mid_colors = [], [], [], []
 
     for u, v, data in graph.edges(data=True):
@@ -204,29 +221,44 @@ def create_resilient_network_figure(
         capacity = data.get("capacity", "N/A")
         is_broken = (u, v) in failed_edges
 
-        # Calculate midpoint
+        # Line paths
+        if is_broken:
+            sev_line_x.extend([x0, x1, None])
+            sev_line_y.extend([y0, y1, None])
+        else:
+            op_line_x.extend([x0, x1, None])
+            op_line_y.extend([y0, y1, None])
+
+        # Waypoint midpoints
         mx = (x0 + x1) / 2.0
         my = (y0 + y1) / 2.0
         mid_x.append(mx)
         mid_y.append(my)
 
-        status_str = "<b style='color:red;'>SEVERED ROUTE</b>" if is_broken else "<b style='color:green;'>OPERATIONAL</b>"
-        cap_str = safe_format_capacity(capacity, default="Unknown", decimals=0, unit=" units")
-        mid_text.append(
-            f"<b>Supply Route:</b> {u} &rarr; {v}<br>"
-            f"<b>Status:</b> {status_str}<br>"
-            f"<b>Material:</b> {material}<br>"
-            f"<b>Capacity:</b> {cap_str}"
+        status_span = (
+            "<span style='color:#EF4444;'><b>SEVERED ROUTE (SHOCK OUTAGE)</b></span>"
+            if is_broken
+            else "<span style='color:#10B981;'><b>OPERATIONAL CORRIDOR</b></span>"
         )
-        mid_colors.append("#D32F2F" if is_broken else "#455A64")
+        cap_str = safe_format_capacity(capacity, default="Unknown", decimals=0, unit=" units")
+        divider = "────────────────────────────"
+        corridor_hover = (
+            f"<b>Supply Corridor:</b> {u} &rarr; {v}<br>"
+            f"<span style='color:#64748B;'>{divider}</span><br>"
+            f"<b>Status:</b> {status_span}<br>"
+            f"<b>Transported Material:</b> {material}<br>"
+            f"<b>Capacity Throughput:</b> {cap_str}"
+        )
+        mid_text.append(corridor_hover)
+        mid_colors.append("#EF4444" if is_broken else "#0284C7")
 
-        # Arrow calculation
+        # Directed Arrow calculation
         dx = x1 - x0
         dy = y1 - y0
         dist = math.hypot(dx, dy)
         if dist > 0:
-            offset_start = 0.20
-            offset_end = 0.25
+            offset_start = min(0.35, dist * 0.20)
+            offset_end = min(0.40, dist * 0.25)
             ax_pos = x0 + (dx / dist) * offset_start
             ay_pos = y0 + (dy / dist) * offset_start
             head_x = x1 - (dx / dist) * offset_end
@@ -247,42 +279,120 @@ def create_resilient_network_figure(
                 showarrow=True,
                 arrowhead=3 if is_broken else 2,
                 arrowsize=1.5 if is_broken else 1.2,
-                arrowwidth=3 if is_broken else 1.8,
-                arrowcolor="#D32F2F" if is_broken else "#90A4AE",
-                opacity=0.9 if is_broken else 0.7,
+                arrowwidth=3.0 if is_broken else 1.8,
+                arrowcolor="#EF4444" if is_broken else "#38BDF8",
+                opacity=0.95 if is_broken else 0.75,
             )
         )
 
-    # Route hover trace
-    fig.add_trace(
-        go.Scatter(
-            x=mid_x,
-            y=mid_y,
-            mode="markers",
-            marker=dict(
-                size=12,
-                color=mid_colors,
-                symbol="circle-dot",
-                line=dict(color="#FFFFFF", width=1.5),
-            ),
-            hoverinfo="text",
-            hovertext=mid_text,
-            name="Supply Routes (Hover)",
-            showlegend=True,
+    # Add Operational Corridors line trace
+    if op_line_x:
+        fig.add_trace(
+            go.Scatter(
+                x=op_line_x,
+                y=op_line_y,
+                mode="lines",
+                line=dict(color="#0284C7", width=1.8),
+                opacity=0.70,
+                hoverinfo="none",
+                name="Operational Corridor",
+                showlegend=True,
+            )
         )
-    )
 
-    # Step 2: Draw Nodes Grouped by State & Role
-    # Define visual buckets
+    # Add Severed Corridors line trace
+    if sev_line_x:
+        fig.add_trace(
+            go.Scatter(
+                x=sev_line_x,
+                y=sev_line_y,
+                mode="lines",
+                line=dict(color="#EF4444", width=3.0),
+                opacity=0.95,
+                hoverinfo="none",
+                name="Severed Corridor",
+                showlegend=True,
+            )
+        )
+
+    # Add Route Telemetry Waypoint trace
+    if mid_x:
+        fig.add_trace(
+            go.Scatter(
+                x=mid_x,
+                y=mid_y,
+                mode="markers",
+                marker=dict(
+                    size=8,
+                    color=mid_colors,
+                    symbol="circle-dot",
+                    line=dict(color="#FFFFFF", width=1.2),
+                ),
+                hoverinfo="text",
+                hovertext=mid_text,
+                name="Route Telemetry",
+                showlegend=False,
+            )
+        )
+
+    # 4. Group Nodes by State & Category
     status_groups: Dict[str, Dict[str, Any]] = {
-        "failed": {"nodes": [], "color": STATUS_COLORS["failed"], "symbol": "x", "name": "Disrupted Root Failure", "size": 24},
-        "confirmed_shortage": {"nodes": [], "color": STATUS_COLORS["confirmed_shortage"], "symbol": "diamond-tall", "name": "Confirmed Shortage", "size": 20},
-        "potentially_affected": {"nodes": [], "color": STATUS_COLORS["potentially_affected"], "symbol": "triangle-up", "name": "Potentially Affected", "size": 18},
-        "operational_raw": {"nodes": [], "color": STATUS_COLORS["unaffected_raw"], "symbol": "diamond", "name": "Raw Material (Intact)", "size": 16},
-        "operational_proc": {"nodes": [], "color": STATUS_COLORS["unaffected_proc"], "symbol": "square", "name": "Processor (Intact)", "size": 16},
-        "operational_supp": {"nodes": [], "color": STATUS_COLORS["unaffected_supp"], "symbol": "circle", "name": "Supplier (Intact)", "size": 16},
-        "operational_fact": {"nodes": [], "color": STATUS_COLORS["unaffected_fact"], "symbol": "hexagon", "name": "Factory / Plant (Intact)", "size": 18},
-        "operational_other": {"nodes": [], "color": STATUS_COLORS["unaffected_other"], "symbol": "circle", "name": "Other Entity (Intact)", "size": 15},
+        "failed": {
+            "nodes": [],
+            "color": STATUS_COLORS["failed"],
+            "symbol": "x",
+            "name": "Disrupted Shock Root",
+            "size": 30,
+        },
+        "confirmed_shortage": {
+            "nodes": [],
+            "color": STATUS_COLORS["confirmed_shortage"],
+            "symbol": "diamond-tall",
+            "name": "Confirmed Shortage",
+            "size": 26,
+        },
+        "potentially_affected": {
+            "nodes": [],
+            "color": STATUS_COLORS["potentially_affected"],
+            "symbol": "triangle-up",
+            "name": "High-Risk / Affected",
+            "size": 24,
+        },
+        "operational_raw": {
+            "nodes": [],
+            "color": STATUS_COLORS["unaffected_raw"],
+            "symbol": "diamond",
+            "name": "Raw Material (Operational)",
+            "size": 24,
+        },
+        "operational_proc": {
+            "nodes": [],
+            "color": STATUS_COLORS["unaffected_proc"],
+            "symbol": "square",
+            "name": "Processor (Operational)",
+            "size": 24,
+        },
+        "operational_supp": {
+            "nodes": [],
+            "color": STATUS_COLORS["unaffected_supp"],
+            "symbol": "circle",
+            "name": "Supplier (Operational)",
+            "size": 24,
+        },
+        "operational_fact": {
+            "nodes": [],
+            "color": STATUS_COLORS["unaffected_fact"],
+            "symbol": "hexagon",
+            "name": "Factory / Plant (Operational)",
+            "size": 26,
+        },
+        "operational_other": {
+            "nodes": [],
+            "color": STATUS_COLORS["unaffected_other"],
+            "symbol": "circle",
+            "name": "Other Entity (Operational)",
+            "size": 22,
+        },
     }
 
     for node, data in graph.nodes(data=True):
@@ -309,6 +419,7 @@ def create_resilient_network_figure(
 
         status_groups[group_key]["nodes"].append(node)
 
+    # 5. Render Node Scatter Traces
     for group_key, group_data in status_groups.items():
         nodes = group_data["nodes"]
         if not nodes:
@@ -318,6 +429,8 @@ def create_resilient_network_figure(
         ny_c = [pos[n][1] for n in nodes]
         hover_texts = []
         labels = []
+        border_colors = []
+        border_widths = []
 
         for n in nodes:
             status_key, status_label = classify_node_status(n, simulation_result)
@@ -328,18 +441,28 @@ def create_resilient_network_figure(
             alts_str = ", ".join(alts) if alts else "None registered"
 
             is_selected = selected_entity and (selected_entity == n)
-            selection_marker = " 🎯 [SELECTED]" if is_selected else ""
+            selection_marker = " 🎯 [INSPECTED]" if is_selected else ""
 
-            hover_html = (
-                f"<b>Entity:</b> {n}{selection_marker}<br>"
-                f"<b>Tier / Role:</b> {node_type}<br>"
-                f"<b>Operational Status:</b> {status_label}<br>"
-                f"<b>Inbound Feeds:</b> {in_deg}<br>"
-                f"<b>Outbound Feeds:</b> {out_deg}<br>"
-                f"<b>Known Alternatives:</b> {alts_str}"
+            if is_selected:
+                border_colors.append("#FBBF24")  # Gold target ring
+                border_widths.append(3.5)
+                labels.append(f"🎯 {n}")
+            else:
+                border_colors.append("#FFFFFF" if group_key in ("failed", "confirmed_shortage") else "#CBD5E1")
+                border_widths.append(1.8)
+                labels.append(n)
+
+            status_color = group_data["color"]
+            divider = "────────────────────────────"
+            node_hover = (
+                f"<b>{n}{selection_marker}</b><br>"
+                f"<span style='color:#38BDF8;'>ROLE: {node_type.upper()}</span><br>"
+                f"<span style='color:#64748B;'>{divider}</span><br>"
+                f"<b>Operational Status:</b> <span style='color:{status_color};'><b>{status_label}</b></span><br>"
+                f"<b>Inbound Feeds:</b> {in_deg} &nbsp;|&nbsp; <b>Outbound:</b> {out_deg}<br>"
+                f"<b>Backup Availability:</b> {alts_str}"
             )
-            hover_texts.append(hover_html)
-            labels.append(n)
+            hover_texts.append(node_hover)
 
         fig.add_trace(
             go.Scatter(
@@ -351,13 +474,13 @@ def create_resilient_network_figure(
                     color=group_data["color"],
                     symbol=group_data["symbol"],
                     line=dict(
-                        color="#FFD700" if (selected_entity in nodes) else "#FFFFFF",
-                        width=2.5 if (selected_entity in nodes) else 1.5,
+                        color=border_colors,
+                        width=border_widths,
                     ),
                 ),
                 text=labels,
                 textposition="bottom center",
-                textfont=dict(size=11, color="#E2E8F0", family="Arial, sans-serif"),
+                textfont=dict(size=11, color="#F8FAFC", family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif"),
                 hoverinfo="text",
                 hovertext=hover_texts,
                 name=group_data["name"],
@@ -365,14 +488,12 @@ def create_resilient_network_figure(
             )
         )
 
-    # Layout styling — dark theme
-    # template="plotly_dark" makes the modebar, hover labels, colour pickers,
-    # and axis defaults all dark-themed at the Plotly engine level.
+    # 6. Overall Layout Styling
     fig.update_layout(
         template="plotly_dark",
         title=dict(
             text=f"<b>{title}</b>",
-            font=dict(size=18, color="#F8FAFC"),
+            font=dict(size=17, color="#F8FAFC", family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif"),
             x=0.02,
             y=0.96,
         ),
@@ -381,30 +502,146 @@ def create_resilient_network_figure(
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=-0.25,
+            y=-0.16,
             xanchor="center",
             x=0.5,
-            bgcolor="rgba(17, 24, 39, 0.85)",
-            bordercolor="#334155",
+            bgcolor="rgba(17, 26, 46, 0.90)",
+            bordercolor="#1E293B",
             borderwidth=1,
-            font=dict(color="#CBD5E1"),
+            font=dict(color="#CBD5E1", size=11),
+            itemsizing="constant",
         ),
         hoverlabel=dict(
-            bgcolor="#1E293B",
+            bgcolor="#151F32",
             bordercolor="#334155",
             font=dict(color="#F8FAFC", size=12),
         ),
         hovermode="closest",
-        margin=dict(b=80, l=40, r=40, t=60),
+        margin=dict(b=70, l=40, r=40, t=55),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        plot_bgcolor="#0F172A",
-        paper_bgcolor="#111827",
-        height=620,
-        font=dict(color="#CBD5E1", family="Arial, sans-serif"),
+        plot_bgcolor="#0A101D",
+        paper_bgcolor="#070B14",
+        height=640,
+        font=dict(color="#CBD5E1", family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif"),
     )
 
     return fig
+
+
+def render_risk_card(finding: Dict[str, Any]) -> str:
+    """
+    Renders an executive-grade HTML card for a single shared risk finding.
+    Features severity pill, score meter bar, tier indicator, affected suppliers chips,
+    business context on why it is a bottleneck, technical score calculations in expandable details,
+    missing data disclosures, and governance recommendations.
+    """
+    node = finding.get("dependency_node", "Unknown Entity")
+    score = float(finding.get("risk_score", 0.0) or 0.0)
+    level = finding.get("risk_level", "Medium")
+    is_shared = bool(finding.get("is_shared", False))
+    tier = finding.get("dependency_tier", "Unknown Tier")
+    affected_suppliers = finding.get("affected_suppliers", [])
+    direct_suppliers = finding.get("direct_affected_suppliers", [])
+    indirect_suppliers = finding.get("indirect_affected_suppliers", [])
+    explanation = finding.get("explanation", "No explanation recorded.")
+    missing_info = finding.get("missing_information", [])
+    rec = finding.get("recommended_investigation", "Review vulnerability and qualify secondary suppliers.")
+
+    if level == "Critical":
+        badge_class = "badge-critical"
+        border_color = "#F43F5E"
+        score_color = "#FB7185"
+    elif level == "High":
+        badge_class = "badge-high"
+        border_color = "#F59E0B"
+        score_color = "#FBBF24"
+    elif level == "Medium":
+        badge_class = "badge-medium"
+        border_color = "#EAB308"
+        score_color = "#FDE047"
+    else:
+        badge_class = "badge-low"
+        border_color = "#10B981"
+        score_color = "#34D399"
+
+    shared_badge = (
+        '<span style="background:rgba(244,63,94,0.15); color:#FB7185; border:1px solid rgba(244,63,94,0.35); padding:3px 10px; border-radius:12px; font-size:0.72rem; font-weight:700; letter-spacing:0.04em;">⚠️ SHARED SINGLE POINT OF FAILURE</span>'
+        if is_shared
+        else '<span style="background:rgba(148,163,184,0.12); color:#CBD5E1; border:1px solid rgba(148,163,184,0.25); padding:3px 10px; border-radius:12px; font-size:0.72rem; font-weight:600;">STANDALONE COMPONENT</span>'
+    )
+
+    supp_chips = "".join([
+        f'<span style="background:rgba(56,189,248,0.12); color:#38BDF8; border:1px solid rgba(56,189,248,0.3); padding:2px 8px; border-radius:10px; font-size:0.76rem; font-weight:600; margin-right:4px; display:inline-block; margin-bottom:3px;">{s}</span>'
+        for s in affected_suppliers
+    ]) if affected_suppliers else '<span style="color:#64748B; font-size:0.78rem;">None detected</span>'
+
+    direct_chips = ", ".join(direct_suppliers) if direct_suppliers else "None"
+    indirect_chips = ", ".join(indirect_suppliers) if indirect_suppliers else "None"
+
+    if is_shared:
+        why_bottleneck = (
+            f"<b>Why this is a shared bottleneck:</b> Feeds <b>{len(affected_suppliers)} independent suppliers</b> simultaneously. "
+            f"An operational outage at <b>{node}</b> interrupts parallel production lines with zero qualified backup alternatives."
+        )
+    else:
+        why_bottleneck = (
+            f"<b>Component Profile:</b> Dedicated single-path dependency feeding downstream manufacturing routes. "
+            f"No cross-supplier contamination detected."
+        )
+
+    missing_html = ""
+    if missing_info:
+        missing_items = " &bull; ".join(missing_info)
+        missing_html = (
+            f'<div style="margin-top:8px; font-size:0.74rem; color:#FBBF24; background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.25); border-radius:6px; padding:6px 10px;">'
+            f'<b>Data Gap Disclosure:</b> {missing_items} (penalized honestly; not assumed zero)'
+            f'</div>'
+        )
+
+    return f"""<div style="background:#151F32; border:1px solid #1E293B; border-top:3px solid {border_color}; border-radius:10px; padding:18px 20px; margin-bottom:14px; box-shadow:0 4px 16px rgba(0,0,0,0.35);">
+<div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px; margin-bottom:12px;">
+<div>
+<div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+<span style="font-size:1.25rem; font-weight:800; color:#F8FAFC;">{node}</span>
+{shared_badge}
+</div>
+<div style="font-size:0.78rem; color:#94A3B8; font-weight:600;">
+SUPPLY CHAIN CORRIDOR: <span style="color:#38BDF8;">{tier}</span>
+</div>
+</div>
+<div style="display:flex; align-items:center; gap:12px;">
+<div style="text-align:right;">
+<div style="font-size:0.70rem; color:#94A3B8; text-transform:uppercase; letter-spacing:0.05em;">Vulnerability Score</div>
+<div style="font-size:1.25rem; font-weight:800; color:{score_color}; font-family:monospace;">{score:.1f} <span style="font-size:0.75rem; color:#64748B;">/ 100</span></div>
+</div>
+<span class="{badge_class}">{level.upper()} RISK</span>
+</div>
+</div>
+<div style="background:rgba(255,255,255,0.02); border:1px solid #1E293B; border-radius:8px; padding:10px 14px; margin-bottom:12px; font-size:0.80rem; color:#CBD5E1; line-height:1.4;">
+{why_bottleneck}
+</div>
+<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:14px; background:#0D1527; border:1px solid #1E293B; border-radius:8px; padding:12px 14px; margin-bottom:12px;">
+<div>
+<div style="font-size:0.70rem; color:#94A3B8; text-transform:uppercase; font-weight:700; margin-bottom:4px;">Affected Downstream Suppliers ({len(affected_suppliers)}):</div>
+<div>{supp_chips}</div>
+<div style="font-size:0.74rem; color:#64748B; margin-top:6px;">
+<b>Direct Dependencies:</b> <span style="color:#CBD5E1;">{direct_chips}</span> &bull; <b>Multi-Tier Feeds:</b> <span style="color:#CBD5E1;">{indirect_chips}</span>
+</div>
+</div>
+<div>
+<div style="font-size:0.70rem; color:#94A3B8; text-transform:uppercase; font-weight:700; margin-bottom:4px;">Audited Resilience Directive:</div>
+<div style="font-size:0.78rem; color:#CBD5E1; line-height:1.4;">{rec}</div>
+{missing_html}
+<details style="margin-top:8px; cursor:pointer;">
+<summary style="font-size:0.74rem; color:#38BDF8; font-weight:700;">🔬 View Technical Score Calculation & Penalty Details</summary>
+<div style="margin-top:6px; font-size:0.75rem; color:#94A3B8; line-height:1.4; background:#070B14; padding:8px 10px; border-radius:6px; border:1px solid #1E293B;">
+{explanation}
+</div>
+</details>
+</div>
+</div>
+</div>"""
 
 
 def build_financial_scenario_from_simulation(
