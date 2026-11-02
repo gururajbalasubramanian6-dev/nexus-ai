@@ -41,7 +41,7 @@ def base_graph():
 
 def test_01_propagation_figure_creation_and_controls(base_graph):
     """Verifies that create_disruption_propagation_figure builds 16 frames and 3 buttons (Play, Pause, Replay)."""
-    sim = simulate_disruption(base_graph, failed_node="Processor X")
+    sim = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
     fig = create_disruption_propagation_figure(
         graph=base_graph,
         simulation_result=sim,
@@ -73,7 +73,7 @@ def test_01_propagation_figure_creation_and_controls(base_graph):
 
 def test_02_origin_shockwave_ring_and_expansion(base_graph):
     """Verifies that the origin expanding shockwave ring exists and expands across frame cycles."""
-    sim = simulate_disruption(base_graph, failed_node="Processor X")
+    sim = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
     fig = create_disruption_propagation_figure(
         graph=base_graph,
         simulation_result=sim,
@@ -100,7 +100,7 @@ def test_02_origin_shockwave_ring_and_expansion(base_graph):
 
 def test_03_disruption_shock_particles_along_severed_corridors(base_graph):
     """Verifies that amber/crimson shock particles travel along severed supply corridors."""
-    sim = simulate_disruption(base_graph, failed_node="Processor X")
+    sim = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
     fig = create_disruption_propagation_figure(
         graph=base_graph,
         simulation_result=sim,
@@ -129,7 +129,7 @@ def test_04_processor_x_propagation_cascade(base_graph):
     Downstream affected suppliers: Supplier A and Supplier B.
     Unaffected entities: Raw Material Q, Processor Y, Supplier C.
     """
-    sim = simulate_disruption(base_graph, failed_node="Processor X")
+    sim = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
     fig = create_disruption_propagation_figure(
         graph=base_graph,
         simulation_result=sim,
@@ -170,7 +170,7 @@ def test_05_raw_material_p_cascade_multi_hop(base_graph):
     Cascade travels through Processor X to Supplier A and Supplier B.
     Unaffected entities: Raw Material Q, Processor Y, Supplier C.
     """
-    sim = simulate_disruption(base_graph, failed_node="Raw Material P")
+    sim = simulate_disruption(base_graph, failed_node="Raw Material P", actor_role="ADMIN")
     fig = create_disruption_propagation_figure(
         graph=base_graph,
         simulation_result=sim,
@@ -205,7 +205,7 @@ def test_06_raw_material_q_cascade(base_graph):
     Cascade travels through Processor Y to Supplier C.
     Unaffected entities: Raw Material P, Processor X, Supplier A, Supplier B.
     """
-    sim = simulate_disruption(base_graph, failed_node="Raw Material Q")
+    sim = simulate_disruption(base_graph, failed_node="Raw Material Q", actor_role="ADMIN")
     fig = create_disruption_propagation_figure(
         graph=base_graph,
         simulation_result=sim,
@@ -233,7 +233,7 @@ def test_06_raw_material_q_cascade(base_graph):
 
 def test_07_propagation_impact_summary_html_and_metrics(base_graph):
     """Verifies that render_disruption_propagation_summary() produces valid, unindented HTML with accurate metrics."""
-    sim = simulate_disruption(base_graph, failed_node="Processor X")
+    sim = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
     summary_html = render_disruption_propagation_summary(sim, base_graph)
 
     assert isinstance(summary_html, str)
@@ -258,7 +258,7 @@ def test_07_propagation_impact_summary_html_and_metrics(base_graph):
 
 def test_08_static_mode_reduced_motion(base_graph):
     """Verifies that animate=False returns a clean static figure with zero frames and no updatemenus."""
-    sim = simulate_disruption(base_graph, failed_node="Processor X")
+    sim = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
     fig = create_disruption_propagation_figure(
         graph=base_graph,
         simulation_result=sim,
@@ -273,7 +273,7 @@ def test_08_static_mode_reduced_motion(base_graph):
 
 def test_09_backward_compatibility_create_resilient_network_figure(base_graph):
     """Verifies that create_resilient_network_figure() defaults preserve backward compatibility with existing tests."""
-    sim = simulate_disruption(base_graph, failed_node="Processor X")
+    sim = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
     # Default call without show_replay or show_propagation_signal
     fig = create_resilient_network_figure(
         graph=base_graph,
@@ -286,3 +286,100 @@ def test_09_backward_compatibility_create_resilient_network_figure(base_graph):
     assert len(fig.layout.updatemenus[0].buttons) == 2
     # Must have exactly 2 frame data items by default for test_animated_map.py compliance
     assert len(fig.frames[0].data) == 2
+
+
+def test_10_propagation_trajectory_parallel_branches_vs_sequential_chain(base_graph):
+    """
+    Regression test for Issue 2:
+    Verifies that Propagation Trajectory in render_disruption_propagation_summary()
+    represents Processor X -> Supplier A and Processor X -> Supplier B as parallel branches
+    and NEVER as a sequential chain 'Processor X -> Supplier A -> Supplier B'.
+    """
+    # 1. Processor X: two independent downstream branches
+    sim_x = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
+    html_x = render_disruption_propagation_summary(sim_x, base_graph)
+
+    assert "Parallel Branches" in html_x
+    assert "Processor X &rarr; Supplier A" in html_x
+    assert "Processor X &rarr; Supplier B" in html_x
+    assert "Supplier A &rarr; Supplier B" not in html_x
+    assert "Processor X &rarr; Supplier A &rarr; Supplier B" not in html_x
+
+    # 2. Raw Material P: two multi-hop parallel branches through Processor X
+    sim_p = simulate_disruption(base_graph, failed_node="Raw Material P", actor_role="ADMIN")
+    html_p = render_disruption_propagation_summary(sim_p, base_graph)
+
+    assert "Parallel Branches" in html_p
+    assert "Raw Material P &rarr; Processor X &rarr; Supplier A" in html_p
+    assert "Raw Material P &rarr; Processor X &rarr; Supplier B" in html_p
+    assert "Supplier A &rarr; Supplier B" not in html_p
+
+    # 3. Raw Material Q: single linear cascade
+    sim_q = simulate_disruption(base_graph, failed_node="Raw Material Q", actor_role="ADMIN")
+    html_q = render_disruption_propagation_summary(sim_q, base_graph)
+
+    assert "Directed Cascade" in html_q
+    assert "Raw Material Q &rarr; Processor Y &rarr; Supplier C" in html_q
+
+    # 4. Terminal sink node (Supplier A): localized outage
+    sim_a = simulate_disruption(base_graph, failed_node="Supplier A", actor_role="ADMIN")
+    html_a = render_disruption_propagation_summary(sim_a, base_graph)
+
+    assert "Localized Outage" in html_a
+    assert "Supplier A (Terminal Sink)" in html_a
+
+
+def test_11_disruption_simulator_ui_downstream_status_and_trajectory_consistency(tmp_path, monkeypatch):
+    """
+    Regression test verifying that the Streamlit Disruption Simulator view (Section 4)
+    renders Supplier A and Supplier B with CONFIRMED SHORTAGE, Severed Inbound Paths: 1,
+    Operational Status vs Shortage Status distinction, Backup Alternatives: Unknown,
+    and parallel propagation trajectory branches.
+    """
+    import time
+    from pathlib import Path
+    from streamlit.testing.v1 import AppTest
+    from agents.auth_manager import AuthManager, UserRole
+
+    temp_auth_db = tmp_path / "test_nexus_auth.db"
+    temp_audit_db = tmp_path / "test_nexus_audit.db"
+    monkeypatch.setenv("NEXUS_AUTH_DB_PATH", str(temp_auth_db))
+    monkeypatch.setenv("NEXUS_AUDIT_DB_PATH", str(temp_audit_db))
+
+    root_dir = Path(__file__).resolve().parent.parent
+    app_path = str(root_dir / "app.py")
+    mgr = AuthManager(str(temp_auth_db))
+    ok_adm, _ = mgr.init_first_admin("admin_test", "admin@nexus.test", "AdminPass123!")
+    assert ok_adm
+    ok_view, _, viewer_u = mgr.create_user(
+        "admin_test", "viewer_test", "viewer@nexus.test", "ViewerPass123!", UserRole.VIEWER
+    )
+    assert ok_view and viewer_u is not None
+
+    at = AppTest.from_file(app_path, default_timeout=30)
+    at.session_state["nexus_auth_authenticated"] = True
+    at.session_state["nexus_auth_user"] = viewer_u
+    at.session_state["nexus_auth_last_activity"] = time.time()
+    at.run()
+
+    # Navigate to Section 4: Disruption Simulator
+    at.sidebar.radio[0].set_value("4. ⚡ Disruption Simulator").run()
+
+    all_markdown = "\n".join(m.value for m in at.markdown)
+
+    # Issue 1 UI assertions
+    assert "CONFIRMED SHORTAGE" in all_markdown
+    assert "Operational (Inbound Supply Starved)" in all_markdown
+    assert "Confirmed Shortage" in all_markdown
+    assert '<b>Severed Inbound Paths:</b> <span style="color:#F8FAFC;">1</span>' in all_markdown
+    assert '<b>Operational Inbound Paths:</b> <span style="color:#F8FAFC;">0</span>' in all_markdown
+    assert '<b>Backup Alternatives:</b> <span style="color:#CBD5E1;">Unknown</span>' in all_markdown
+
+    # Issue 2 UI assertions
+    assert "Parallel Branches" in all_markdown
+    assert "Processor X &rarr; Supplier A" in all_markdown
+    assert "Processor X &rarr; Supplier B" in all_markdown
+    assert "Supplier A &rarr; Supplier B" not in all_markdown
+
+
+

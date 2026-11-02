@@ -35,7 +35,7 @@ def base_graph():
 
 def test_01_animated_figure_structure_and_controls(base_graph):
     """Verifies that an animated figure creates frames, updatemenus, and particle traces."""
-    sim = simulate_disruption(base_graph, failed_node="Processor X")
+    sim = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
     fig = create_resilient_network_figure(
         base_graph,
         simulation_result=sim,
@@ -61,7 +61,7 @@ def test_01_animated_figure_structure_and_controls(base_graph):
 
 def test_02_static_mode_reduced_motion(base_graph):
     """Verifies that when animate=False, no frames or updatemenus are created (zero overhead)."""
-    sim = simulate_disruption(base_graph, failed_node="Processor X")
+    sim = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
     fig = create_resilient_network_figure(
         base_graph,
         simulation_result=sim,
@@ -79,7 +79,7 @@ def test_02_static_mode_reduced_motion(base_graph):
 
 def test_03_processor_x_disruption_animation(base_graph):
     """Verifies that Processor X failure animates operational in-corridor and highlights severed out-corridors."""
-    sim = simulate_disruption(base_graph, failed_node="Processor X")
+    sim = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
     fig = create_resilient_network_figure(
         base_graph,
         simulation_result=sim,
@@ -108,7 +108,7 @@ def test_03_processor_x_disruption_animation(base_graph):
 
 def test_04_raw_material_p_disruption_animation(base_graph):
     """Verifies Raw Material P failure cascade animation."""
-    sim = simulate_disruption(base_graph, failed_node="Raw Material P")
+    sim = simulate_disruption(base_graph, failed_node="Raw Material P", actor_role="ADMIN")
     fig = create_resilient_network_figure(
         base_graph,
         simulation_result=sim,
@@ -125,7 +125,7 @@ def test_04_raw_material_p_disruption_animation(base_graph):
 
 def test_05_raw_material_q_disruption_animation(base_graph):
     """Verifies Raw Material Q failure cascade animation."""
-    sim = simulate_disruption(base_graph, failed_node="Raw Material Q")
+    sim = simulate_disruption(base_graph, failed_node="Raw Material Q", actor_role="ADMIN")
     fig = create_resilient_network_figure(
         base_graph,
         simulation_result=sim,
@@ -142,7 +142,7 @@ def test_05_raw_material_q_disruption_animation(base_graph):
 
 def test_06_supplier_terminal_node_disruption_animation(base_graph):
     """Verifies Supplier A (leaf sink node) outage produces safe animation without crashing."""
-    sim = simulate_disruption(base_graph, failed_node="Supplier A")
+    sim = simulate_disruption(base_graph, failed_node="Supplier A", actor_role="ADMIN")
     fig = create_resilient_network_figure(
         base_graph,
         simulation_result=sim,
@@ -166,7 +166,7 @@ def test_07_empty_graph_edge_case():
 
 def test_08_continuous_loop_boundary_continuity(base_graph):
     """Verifies that frame 15 transitions into frame 0 with smooth periodic continuity."""
-    sim = simulate_disruption(base_graph, failed_node="Processor X")
+    sim = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
     fig = create_resilient_network_figure(
         base_graph,
         simulation_result=sim,
@@ -203,7 +203,7 @@ def test_09_play_button_fromcurrent_false(base_graph):
 def test_10_severed_corridors_exclude_particles(base_graph):
     """Verifies that severed corridors NEVER receive moving particles and remain solid red."""
     for node in ["Processor X", "Raw Material P", "Raw Material Q"]:
-        sim = simulate_disruption(base_graph, failed_node=node)
+        sim = simulate_disruption(base_graph, failed_node=node, actor_role="ADMIN")
         fig = create_resilient_network_figure(base_graph, simulation_result=sim, animate=True)
 
         # Severed corridor trace exists and is red

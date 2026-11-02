@@ -18,6 +18,7 @@ Design Principles:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
@@ -69,7 +70,9 @@ class AuditLogger:
     Thread-safe and compatible with Streamlit and CLI environments.
     """
 
-    def __init__(self, db_path: str = "nexus_audit.db") -> None:
+    def __init__(self, db_path: Optional[str] = None) -> None:
+        if db_path is None:
+            db_path = os.environ.get("NEXUS_AUDIT_DB_PATH", "nexus_audit.db")
         self.db_path = db_path
         self._is_memory = (db_path == ":memory:")
         self._shared_mem_conn: Optional[sqlite3.Connection] = None
@@ -181,12 +184,19 @@ class AuditLogger:
         financial_result: Dict[str, Any],
         decision_exp: Optional[Dict[str, Any]] = None,
         execution_channel: str = "STREAMLIT",
+        actor_role: Optional[str] = None,
     ) -> str:
         """
         Atomically records a new simulation run in nexus_audit_runs and appends the
         initial SIMULATION_EXECUTED event to nexus_audit_events within one transaction.
         Rolls back both operations if an error occurs.
         """
+        normalized_role = str(actor_role).strip().upper() if actor_role is not None else ""
+        if normalized_role not in ("ADMIN", "REVIEWER"):
+            raise PermissionError(
+                f"Access denied: Role '{actor_role}' is read-only or unauthorized and cannot create simulation audit records."
+            )
+
         now_utc = get_utc_iso_timestamp()
         run_suffix = uuid.uuid4().hex[:6].upper()
         timestamp_slug = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -332,11 +342,13 @@ class AuditLogger:
         reviewer_label: str,
         justification: str,
         metadata: Optional[Dict[str, Any]] = None,
+        actor_role: Optional[str] = None,
     ) -> Tuple[bool, str, str]:
         """
         Records a human governance decision (approval or rejection) in an append-only manner.
 
         Safeguards:
+          - Enforces backend RBAC authorization (VIEWER role cannot approve or reject).
           - Prevents approval of unquantified scenarios.
           - Rejects duplicate approval/rejection requests for already decided runs.
           - Mandates justification for rejections.
@@ -347,11 +359,26 @@ class AuditLogger:
         Returns:
           (success: bool, message: str, current_status: str)
         """
+        normalized_role = str(actor_role).strip().upper() if actor_role is not None else ""
+        if normalized_role not in ("ADMIN", "REVIEWER"):
+            return (
+                False,
+                f"Access denied: Role '{actor_role}' is read-only or unauthorized and cannot approve or reject recommendations.",
+                "UNAUTHORIZED",
+            )
+
+        clean_label = (reviewer_label or "").strip()
+        if "(VIEWER)" in clean_label.upper():
+            return (
+                False,
+                "Access denied: VIEWER role is read-only and cannot approve or reject recommendations.",
+                "UNAUTHORIZED",
+            )
+
         valid_types = {"RECOMMENDATION_APPROVED", "RECOMMENDATION_REJECTED"}
         if decision_type not in valid_types:
             return False, f"Invalid decision type: '{decision_type}'. Must be one of {valid_types}.", "UNKNOWN"
 
-        clean_label = (reviewer_label or "").strip()
         if not clean_label:
             clean_label = "Prototype Reviewer (Supply Chain Risk Analyst)"
 

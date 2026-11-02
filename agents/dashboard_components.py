@@ -613,7 +613,7 @@ def create_resilient_network_figure(
             out_deg = graph.out_degree(n)
             node_type = graph.nodes[n].get("node_type", "Unknown")
             alts = graph.nodes[n].get("alternatives", [])
-            alts_str = ", ".join(alts) if alts else "None registered"
+            alts_str = ", ".join(alts) if alts else "Unknown"
 
             is_selected = selected_entity and (selected_entity == n)
             selection_marker = " 🎯 [INSPECTED]" if is_selected else ""
@@ -1534,17 +1534,48 @@ def render_disruption_propagation_summary(
     confirmed_count = len(confirmed_nodes)
     potential_count = len(potential_nodes)
 
-    # Severed connections count
+    # Severed connections count & actual directed propagation trajectories
+    raw_paths = simulation_result.get("affected_paths") or simulation_result.get("disrupted_paths") or []
+    corridor_paths = [list(p) for p in raw_paths if isinstance(p, (list, tuple)) and len(p) > 1]
+
     severed_edges = set()
+    for p in corridor_paths:
+        for i in range(len(p) - 1):
+            severed_edges.add((p[i], p[i + 1]))
+
     if graph:
         for u, v in graph.edges():
             if u == failed_entity or v == failed_entity:
                 severed_edges.add((u, v))
-        paths = simulation_result.get("affected_paths") or simulation_result.get("disrupted_paths") or []
-        for p in paths:
-            for i in range(len(p) - 1):
-                severed_edges.add((p[i], p[i + 1]))
+
+        if not corridor_paths and failed_entity in graph and affected_entities:
+            sinks = [d for d in affected_entities if d in graph and graph.out_degree(d) == 0]
+            targets = sinks if sinks else [d for d in affected_entities if d in graph]
+            seen_sigs = set()
+            for t in targets:
+                try:
+                    for p in nx.all_simple_paths(graph, source=failed_entity, target=t, cutoff=10):
+                        sig = "->".join(p)
+                        if sig not in seen_sigs and len(p) > 1:
+                            seen_sigs.add(sig)
+                            corridor_paths.append(list(p))
+                except (nx.NetworkXNoPath, nx.NodeNotFound):
+                    continue
+
     severed_count = len(severed_edges)
+
+    if not corridor_paths and affected_entities:
+        corridor_paths = [[failed_entity, ent] for ent in affected_entities]
+
+    if corridor_paths:
+        trajectory_mode = "Parallel Branches" if len(corridor_paths) > 1 else "Directed Cascade"
+        branch_strings = [" &rarr; ".join(str(node) for node in p) for p in corridor_paths[:3]]
+        if len(corridor_paths) > 3:
+            branch_strings.append(f"+{len(corridor_paths) - 3} additional branch(es)")
+        trajectory_sub = "<br>".join(branch_strings)
+    else:
+        trajectory_mode = "Localized Outage"
+        trajectory_sub = f"{failed_entity} (Terminal Sink)"
 
     # Severity tier styling
     sev_class = {
@@ -1598,8 +1629,8 @@ def render_disruption_propagation_summary(
         '    </div>',
         '    <div class="propagation-summary-metric-card">',
         '      <div class="propagation-metric-label">Propagation Trajectory</div>',
-        f'     <div class="propagation-metric-value" style="color:#38BDF8; font-size:1.0rem;">Directed Cascade</div>',
-        f'     <div class="propagation-metric-sub">{failed_entity} &rarr; {" &rarr; ".join(affected_entities[:2]) if affected_entities else "Terminal Sink"}</div>',
+        f'     <div class="propagation-metric-value" style="color:#38BDF8; font-size:1.0rem;">{trajectory_mode}</div>',
+        f'     <div class="propagation-metric-sub">{trajectory_sub}</div>',
         '    </div>',
         '  </div>',
         '</div>',

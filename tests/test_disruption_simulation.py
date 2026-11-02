@@ -40,7 +40,7 @@ def test_processor_x_failure_affects_suppliers_a_and_b(synthetic_graph):
     Test A: When Processor X fails, Supplier A and Supplier B must both be
     identified in the affected entities list.
     """
-    result = simulate_disruption(synthetic_graph, failed_node="Processor X")
+    result = simulate_disruption(synthetic_graph, failed_node="Processor X", actor_role="ADMIN")
     affected = result["affected_entities"]
 
     assert "Supplier A" in affected, "Supplier A must be affected by Processor X failure"
@@ -56,7 +56,7 @@ def test_unrelated_entity_not_marked_affected(synthetic_graph):
     Test B: Unrelated entities (e.g. Raw Material Q, Processor Y, Supplier C)
     must NOT be marked as affected when Processor X fails.
     """
-    result = simulate_disruption(synthetic_graph, failed_node="Processor X")
+    result = simulate_disruption(synthetic_graph, failed_node="Processor X", actor_role="ADMIN")
     affected = set(result["affected_entities"])
 
     assert "Raw Material Q" not in affected, "Upstream unrelated node should not be affected"
@@ -76,7 +76,7 @@ def test_factory_failure_handled_correctly(synthetic_graph):
     - Disruption type recognized as Factory failure
     - Impact level is Low
     """
-    result = simulate_disruption(synthetic_graph, failed_node="Factory 1")
+    result = simulate_disruption(synthetic_graph, failed_node="Factory 1", actor_role="ADMIN")
 
     assert result["disruption_type"] == "Factory failure"
     assert len(result["affected_entities"]) == 0
@@ -94,7 +94,7 @@ def test_supplier_failure_handled_correctly(synthetic_graph):
     - Factory 1 is affected
     - Factory 2 is not affected (supplied by B and C)
     """
-    result = simulate_disruption(synthetic_graph, failed_node="Supplier A")
+    result = simulate_disruption(synthetic_graph, failed_node="Supplier A", actor_role="ADMIN")
 
     assert result["disruption_type"] == "Supplier failure"
     assert "Factory 1" in result["affected_entities"]
@@ -117,7 +117,7 @@ def test_missing_capacity_data_flagged_without_inventing_values():
     G.add_node("Node B", node_type="factory")   # No capacity
     G.add_edge("Node A", "Node B")              # No capacity on edge
 
-    result = simulate_disruption(G, failed_node="Node A")
+    result = simulate_disruption(G, failed_node="Node A", actor_role="ADMIN")
 
     assert result["estimated_capacity_impact"]["has_complete_capacity_data"] is False
     assert result["estimated_capacity_impact"]["estimated_direct_capacity_loss"] is None
@@ -138,7 +138,7 @@ def test_disconnected_nodes_handled_correctly():
     G = nx.DiGraph()
     G.add_node("Isolated Island", node_type="factory", capacity=50.0)
 
-    result = simulate_disruption(G, failed_node="Isolated Island")
+    result = simulate_disruption(G, failed_node="Isolated Island", actor_role="ADMIN")
 
     assert result["failed_entity"] == "Isolated Island"
     assert result["affected_entities"] == []
@@ -155,23 +155,23 @@ def test_invalid_input_produces_clear_error(synthetic_graph):
     """
     # Graph is None
     with pytest.raises(TypeError, match="Graph cannot be None"):
-        simulate_disruption(None, failed_node="Processor X")
+        simulate_disruption(None, failed_node="Processor X", actor_role="ADMIN")
 
     # Graph is wrong type
     with pytest.raises(TypeError, match="Expected networkx.DiGraph"):
-        simulate_disruption("not_a_graph", failed_node="Processor X")
+        simulate_disruption("not_a_graph", failed_node="Processor X", actor_role="ADMIN")
 
     # Empty graph
     with pytest.raises(ValueError, match="graph is empty"):
-        simulate_disruption(nx.DiGraph(), failed_node="Processor X")
+        simulate_disruption(nx.DiGraph(), failed_node="Processor X", actor_role="ADMIN")
 
     # Non-existent node
     with pytest.raises(ValueError, match="not found in the supply chain graph"):
-        simulate_disruption(synthetic_graph, failed_node="NonExistent_Node_999")
+        simulate_disruption(synthetic_graph, failed_node="NonExistent_Node_999", actor_role="ADMIN")
 
     # No target specified
     with pytest.raises(ValueError, match="Must specify either failed_node"):
-        simulate_disruption(synthetic_graph)
+        simulate_disruption(synthetic_graph, actor_role="ADMIN")
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +183,7 @@ def test_multi_level_downstream_relationships(synthetic_graph):
     When Processor X fails, both Tier 1 suppliers (Supplier A, Supplier B)
     AND Tier 2 factories (Factory 1, Factory 2) must be in affected_entities.
     """
-    result = simulate_disruption(synthetic_graph, failed_node="Processor X")
+    result = simulate_disruption(synthetic_graph, failed_node="Processor X", actor_role="ADMIN")
     affected = set(result["affected_entities"])
 
     expected = {"Supplier A", "Supplier B", "Factory 1", "Factory 2"}
@@ -211,7 +211,7 @@ def test_repeated_paths_no_duplicate_entities():
     diamond_G.add_edge("B", "D", material="Subassembly 1", capacity=50)
     diamond_G.add_edge("C", "D", material="Subassembly 2", capacity=50)
 
-    result = simulate_disruption(diamond_G, failed_node="A")
+    result = simulate_disruption(diamond_G, failed_node="A", actor_role="ADMIN")
     affected = result["affected_entities"]
 
     assert len(affected) == len(set(affected)), "affected_entities must contain no duplicates"
@@ -227,7 +227,7 @@ def test_returned_output_schema(synthetic_graph):
     Test J: Validates that all required top-level keys and nested structures
     are present and typed correctly according to Task 5.
     """
-    result = simulate_disruption(synthetic_graph, failed_node="Processor X")
+    result = simulate_disruption(synthetic_graph, failed_node="Processor X", actor_role="ADMIN")
 
     required_keys = [
         "failed_entity",
@@ -273,6 +273,7 @@ def test_transport_route_failure_via_edge_tuple(synthetic_graph):
     result = simulate_disruption(
         synthetic_graph,
         failed_edge=("Processor X", "Supplier A"),
+        actor_role="ADMIN",
     )
 
     assert result["disruption_type"] == "Transport route failure"
@@ -285,7 +286,7 @@ def test_transport_route_failure_via_route_attribute(synthetic_graph):
     """
     Tests transport route failure by passing a route identifier string.
     """
-    result = simulate_disruption(synthetic_graph, failed_route="Route-SA-F1")
+    result = simulate_disruption(synthetic_graph, failed_route="Route-SA-F1", actor_role="ADMIN")
 
     assert result["disruption_type"] == "Transport route failure"
     assert result["affected_entities"] == ["Factory 1"]
@@ -299,7 +300,7 @@ def test_distinguish_potentially_affected_vs_confirmed_shortage(synthetic_graph)
     - Factory 2 gets supply from Supplier B (severed) AND Supplier C (operational via Processor Y)
       -> Factory 2 is potentially affected, not confirmed shortage!
     """
-    result = simulate_disruption(synthetic_graph, failed_node="Processor X")
+    result = simulate_disruption(synthetic_graph, failed_node="Processor X", actor_role="ADMIN")
     details = {d["entity"]: d for d in result["entity_impact_details"]}
 
     assert details["Factory 1"]["status"] == "confirmed_shortage"
@@ -313,7 +314,7 @@ def test_no_double_counting_capacity(synthetic_graph):
     Outgoing from Processor X: 100 to A, 100 to B -> total direct = 200.
     Multi-tier sum would be 200 + 100 + 100 + 100 + 100 = 600 (invalid double-counting).
     """
-    result = simulate_disruption(synthetic_graph, failed_node="Processor X")
+    result = simulate_disruption(synthetic_graph, failed_node="Processor X", actor_role="ADMIN")
     cap_impact = result["estimated_capacity_impact"]
 
     assert cap_impact["estimated_direct_capacity_loss"] == 200.0
@@ -325,7 +326,7 @@ def test_disruption_agent_class_wrapper(synthetic_graph):
     Tests the DisruptionSimulationAgent OOP interface and simulate_all_nodes method.
     """
     agent = DisruptionSimulationAgent(synthetic_graph)
-    df = agent.simulate_all_nodes()
+    df = agent.simulate_all_nodes(actor_role="ADMIN")
 
     assert isinstance(df, pd.DataFrame)
     assert len(df) == synthetic_graph.number_of_nodes()
@@ -352,7 +353,7 @@ def test_processor_x_failure_operational_inbound_and_shortage(synthetic_graph):
     3. Factory 2 (supplied by severed Supplier B and active Supplier C) has:
        Operational Inbound = 1, Severed Inbound = 1, Status = Potentially Affected.
     """
-    res = simulate_disruption(synthetic_graph, failed_node="Processor X")
+    res = simulate_disruption(synthetic_graph, failed_node="Processor X", actor_role="ADMIN")
     details = {d["entity"]: d for d in res["entity_impact_details"]}
 
     # Supplier A and B: direct link from failed node is severed
@@ -383,7 +384,7 @@ def test_raw_material_p_failure_operational_inbound_and_shortage():
     df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
     graph = build_supply_chain_graph(df)
 
-    res = simulate_disruption(graph, failed_node="Raw Material P")
+    res = simulate_disruption(graph, failed_node="Raw Material P", actor_role="ADMIN")
     details = {d["entity"]: d for d in res["entity_impact_details"]}
 
     assert details["Processor X"]["operational_inbound_links"] == 0
@@ -408,7 +409,7 @@ def test_raw_material_q_failure_operational_inbound_and_shortage():
     df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
     graph = build_supply_chain_graph(df)
 
-    res = simulate_disruption(graph, failed_node="Raw Material Q")
+    res = simulate_disruption(graph, failed_node="Raw Material Q", actor_role="ADMIN")
     details = {d["entity"]: d for d in res["entity_impact_details"]}
 
     assert details["Processor Y"]["operational_inbound_links"] == 0
@@ -431,7 +432,7 @@ def test_broken_supply_corridors_and_recommended_actions_aliases():
     graph = build_supply_chain_graph(df)
 
     # 1. Processor X failure
-    res_x = simulate_disruption(graph, failed_node="Processor X")
+    res_x = simulate_disruption(graph, failed_node="Processor X", actor_role="ADMIN")
     assert "disrupted_paths" in res_x
     assert "affected_paths" in res_x
     assert res_x["disrupted_paths"] == res_x["affected_paths"]
@@ -444,7 +445,7 @@ def test_broken_supply_corridors_and_recommended_actions_aliases():
     assert len(res_x["recommended_actions"]) >= 4
 
     # 2. Raw Material P failure
-    res_p = simulate_disruption(graph, failed_node="Raw Material P")
+    res_p = simulate_disruption(graph, failed_node="Raw Material P", actor_role="ADMIN")
     assert res_p["disrupted_paths"] == res_p["affected_paths"]
     assert len(res_p["disrupted_paths"]) == 2
     assert ["Raw Material P", "Processor X", "Supplier A"] in res_p["disrupted_paths"]
@@ -453,7 +454,7 @@ def test_broken_supply_corridors_and_recommended_actions_aliases():
     assert len(res_p["recommended_actions"]) >= 4
 
     # 3. Raw Material Q failure
-    res_q = simulate_disruption(graph, failed_node="Raw Material Q")
+    res_q = simulate_disruption(graph, failed_node="Raw Material Q", actor_role="ADMIN")
     assert res_q["disrupted_paths"] == res_q["affected_paths"]
     assert len(res_q["disrupted_paths"]) == 1
     assert ["Raw Material Q", "Processor Y", "Supplier C"] in res_q["disrupted_paths"]
@@ -473,18 +474,75 @@ def test_branching_aware_severity_classification():
     graph = build_supply_chain_graph(df)
 
     # 1. Raw Material Q -> HIGH
-    res_q = simulate_disruption(graph, failed_node="Raw Material Q")
+    res_q = simulate_disruption(graph, failed_node="Raw Material Q", actor_role="ADMIN")
     assert res_q["impact_level"] == "High"
 
     # 2. Processor X -> CRITICAL (shared choke-point with >= 2 confirmed shortages)
-    res_x = simulate_disruption(graph, failed_node="Processor X")
+    res_x = simulate_disruption(graph, failed_node="Processor X", actor_role="ADMIN")
     assert res_x["impact_level"] == "Critical"
 
     # 3. Raw Material P -> CRITICAL (>= 3 confirmed shortages across tree)
-    res_p = simulate_disruption(graph, failed_node="Raw Material P")
+    res_p = simulate_disruption(graph, failed_node="Raw Material P", actor_role="ADMIN")
     assert res_p["impact_level"] == "Critical"
 
     # 4. Terminal supplier failures retain safe LOW classification
     for supplier in ["Supplier A", "Supplier B", "Supplier C"]:
-        res_sup = simulate_disruption(graph, failed_node=supplier)
+        res_sup = simulate_disruption(graph, failed_node=supplier, actor_role="ADMIN")
         assert res_sup["impact_level"] == "Low"
+
+
+def test_downstream_supplier_status_severed_paths_and_ledger_consistency():
+    """
+    Regression test for Issue 1:
+    Verifies that when Processor X fails:
+    1. Supplier A and Supplier B have consistent status, severed inbound paths (1),
+       operational inbound paths (0), and confirmed_shortage=True.
+    2. Operational status ('Operational (Inbound Supply Starved)') is explicitly
+       distinguished from shortage status ('Confirmed Shortage').
+    3. Unknown backup alternatives remain explicitly marked as 'Unknown'.
+    4. Simulation graph node classification and downstream impact ledger (DataFrame)
+       agree on all fields.
+    """
+    from agents.dashboard_components import classify_node_status
+
+    df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
+    graph = build_supply_chain_graph(df)
+    agent = DisruptionSimulationAgent(graph)
+
+    res_x = agent.simulate(failed_node="Processor X", actor_role="ADMIN")
+    details = res_x["entity_impact_details"]
+    assert len(details) == 2
+
+    details_by_entity = {d["entity"]: d for d in details}
+    assert set(details_by_entity.keys()) == {"Supplier A", "Supplier B"}
+
+    for sup in ("Supplier A", "Supplier B"):
+        item = details_by_entity[sup]
+        assert item["status"] == "confirmed_shortage"
+        assert item["confirmed_shortage"] is True
+        assert item["potentially_affected"] is False
+        assert item["shortage_status"] == "Confirmed Shortage"
+        assert item["operational_status"] == "Operational (Inbound Supply Starved)"
+        assert item["total_inbound_links"] == 1
+        assert item["severed_inbound_links"] == 1
+        assert item["severed_inbound_paths_count"] == 1
+        assert item["operational_inbound_links"] == 0
+        assert item["alternative_status"] == "Unknown"
+
+        # Graph node status classification must agree with entity_impact_details
+        graph_status_key, _ = classify_node_status(sup, res_x)
+        assert graph_status_key == item["status"] == "confirmed_shortage"
+
+    # Downstream impact ledger DataFrame must agree with simulation results
+    ledger_df = agent.get_entity_impact_dataframe(res_x)
+    assert len(ledger_df) == 2
+    for _, row in ledger_df.iterrows():
+        ent = row["Entity"]
+        assert ent in ("Supplier A", "Supplier B")
+        assert row["Status"] == "confirmed_shortage"
+        assert row["Operational Status"] == "Operational (Inbound Supply Starved)"
+        assert row["Shortage Status"] == "Confirmed Shortage"
+        assert row["Severed Inbound"] == 1
+        assert row["Operational Inbound"] == 0
+        assert row["Backup Alternatives"] == "Unknown"
+

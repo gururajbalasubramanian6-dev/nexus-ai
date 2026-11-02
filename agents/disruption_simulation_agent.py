@@ -277,13 +277,41 @@ def _evaluate_entity_shortage(
                 f"Alternative supply path from source(s) ({', '.join(active_sources_reaching)}) remains operational via alternative branches."
             )
 
+    confirmed_shortage_flag = status == "confirmed_shortage"
+    potentially_affected_flag = status == "potentially_affected"
+    shortage_status_label = (
+        "Confirmed Shortage"
+        if confirmed_shortage_flag
+        else ("Potentially Affected" if potentially_affected_flag else "No Shortage")
+    )
+    operational_status_label = (
+        "Operational (Inbound Supply Starved)"
+        if confirmed_shortage_flag
+        else (
+            "Operational (Partial / Redundant Inbound)"
+            if potentially_affected_flag
+            else "Operational"
+        )
+    )
+    alternative_status_label = (
+        f"Unverified ({', '.join(alternatives)})"
+        if len(alternatives) > 0
+        else "Unknown"
+    )
+
     return {
         "entity": entity,
         "status": status,
+        "shortage_status": shortage_status_label,
+        "operational_status": operational_status_label,
+        "confirmed_shortage": confirmed_shortage_flag,
+        "potentially_affected": potentially_affected_flag,
         "total_inbound_links": total_inbound,
         "severed_inbound_links": severed_inbound_count,
+        "severed_inbound_paths_count": severed_inbound_count,
         "operational_inbound_links": operational_inbound_count,
         "backup_alternatives_count": len(alternatives),
+        "alternative_status": alternative_status_label,
         "has_active_upstream_source_path": has_active_source_path,
         "is_alternative_sufficient": is_alternative_sufficient,
         "alternative_sufficiency": alternative_sufficiency,
@@ -449,7 +477,7 @@ def _determine_impact_level(
     return level, "; ".join(reasons)
 
 
-def simulate_disruption(
+def _compute_disruption_simulation(
     graph: nx.DiGraph,
     failed_node: Optional[Union[str, Tuple[str, str]]] = None,
     disruption_type: Optional[str] = None,
@@ -457,45 +485,9 @@ def simulate_disruption(
     failed_route: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Simulates the multi-tier cascading disruption when an entity or transport route fails.
-
-    Parameters
-    ----------
-    graph : nx.DiGraph
-        Directed supply-chain graph where edges represent flow from upstream to downstream.
-    failed_node : Optional[Union[str, Tuple[str, str]]], default=None
-        Identifier of the failed supply chain entity (node name) or edge tuple (u, v).
-    disruption_type : Optional[str], default=None
-        Type of disruption (e.g. 'Supplier failure', 'Processor failure',
-        'Factory failure', 'Transport route failure'). If None, automatically inferred.
-    failed_edge : Optional[Tuple[str, str]], default=None
-        Alternative explicit parameter to specify an edge disruption (u, v).
-    failed_route : Optional[str], default=None
-        Route identifier string matching an edge 'route' attribute.
-
-    Returns
-    -------
-    Dict[str, Any]
-        Structured simulation results containing:
-        - failed_entity: Name or identifier of failed entity
-        - disruption_type: Standardized disruption type
-        - affected_entities: List of unique downstream entity names (no duplicates)
-        - affected_paths: List of disrupted directed paths
-        - affected_materials: List of unique material names impacted
-        - estimated_capacity_impact: Dictionary detailing capacity loss and accounting method
-        - impact_level: 'Low', 'Medium', 'High', or 'Critical'
-        - explanation: Plain-English summary of causal disruption mechanisms
-        - missing_information: List of data gaps preventing full estimation
-        - assumptions: List of explicit modeling assumptions
-        - recommended_next_actions: Actionable next steps for operations teams
-        - entity_impact_details: Granular status per entity (potentially affected vs confirmed shortage)
-
-    Raises
-    ------
-    TypeError
-        If graph is not a networkx.DiGraph or is None.
-    ValueError
-        If inputs are missing, graph is empty, or failed entity is not found.
+    Internal deterministic graph disruption propagation computation.
+    External callers must use RBAC-protected simulate_disruption() for simulation
+    executions or hydrate_read_only_baseline_simulation() for read-only Viewer baseline hydration.
     """
     # 1. Input Validation
     if graph is None:
@@ -761,6 +753,60 @@ def simulate_disruption(
     }
 
 
+def simulate_disruption(
+    graph: nx.DiGraph,
+    failed_node: Optional[Union[str, Tuple[str, str]]] = None,
+    disruption_type: Optional[str] = None,
+    failed_edge: Optional[Tuple[str, str]] = None,
+    failed_route: Optional[str] = None,
+    actor_role: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Simulates the multi-tier cascading disruption when an entity or transport route fails.
+    Enforces strict backend role authorization (requires actor_role in ('ADMIN', 'REVIEWER')).
+    """
+    normalized_role = str(actor_role).strip().upper() if actor_role is not None else ""
+    if normalized_role not in ("ADMIN", "REVIEWER"):
+        raise PermissionError(
+            f"Access denied: Role '{actor_role}' is read-only or unauthorized and cannot execute disruption simulations."
+        )
+
+    return _compute_disruption_simulation(
+        graph=graph,
+        failed_node=failed_node,
+        disruption_type=disruption_type,
+        failed_edge=failed_edge,
+        failed_route=failed_route,
+    )
+
+
+def hydrate_read_only_baseline_simulation(
+    graph: nx.DiGraph,
+    baseline_node: str = "Processor X",
+) -> Dict[str, Any]:
+    """
+    Computes the fixed default read-only baseline snapshot for initial VIEWER
+    dashboard hydration. Explicitly separated from user-triggered simulation execution:
+    does not accept user-supplied disruption categories, edge overrides, or route parameters.
+    """
+    if graph is None or not isinstance(graph, nx.DiGraph) or graph.number_of_nodes() == 0:
+        target = baseline_node
+    elif baseline_node in graph:
+        target = baseline_node
+    else:
+        target = list(graph.nodes())[0]
+
+    baseline_res = _compute_disruption_simulation(
+        graph=graph,
+        failed_node=target,
+        disruption_type=None,
+        failed_edge=None,
+        failed_route=None,
+    )
+    baseline_res["is_read_only_baseline"] = True
+    return baseline_res
+
+
 class DisruptionSimulationAgent:
     """
     Object-oriented agent wrapper for the Disruption Simulation module.
@@ -783,6 +829,7 @@ class DisruptionSimulationAgent:
         disruption_type: Optional[str] = None,
         failed_edge: Optional[Tuple[str, str]] = None,
         failed_route: Optional[str] = None,
+        actor_role: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Runs the disruption simulation on the loaded graph."""
         if self.graph is None:
@@ -793,9 +840,10 @@ class DisruptionSimulationAgent:
             disruption_type=disruption_type,
             failed_edge=failed_edge,
             failed_route=failed_route,
+            actor_role=actor_role,
         )
 
-    def simulate_all_nodes(self) -> pd.DataFrame:
+    def simulate_all_nodes(self, actor_role: Optional[str] = None) -> pd.DataFrame:
         """
         Simulates individual failure of every node in the graph and returns
         a consolidated comparison DataFrame for Streamlit display.
@@ -805,7 +853,7 @@ class DisruptionSimulationAgent:
 
         records = []
         for node in self.graph.nodes:
-            res = self.simulate(failed_node=node)
+            res = self.simulate(failed_node=node, actor_role=actor_role)
             records.append({
                 "Entity": res["failed_entity"],
                 "Disruption Type": res["disruption_type"],
@@ -826,17 +874,38 @@ class DisruptionSimulationAgent:
         details = simulation_result.get("entity_impact_details", [])
         if not details:
             return pd.DataFrame(columns=[
-                "Entity", "Status", "Operational Inbound", "Severed Inbound",
+                "Entity", "Status", "Operational Status", "Shortage Status",
+                "Operational Inbound", "Severed Inbound", "Backup Alternatives",
                 "Capacity Deficit", "Alternative Sufficiency", "Explanation"
             ])
 
         records = []
         for d in details:
+            status_val = d.get("status", "")
+            is_conf = bool(status_val == "confirmed_shortage" or d.get("confirmed_shortage"))
+            is_pot = bool(status_val == "potentially_affected" or d.get("potentially_affected"))
+            op_status = d.get(
+                "operational_status",
+                "Operational (Inbound Supply Starved)"
+                if is_conf
+                else ("Operational (Partial / Redundant Inbound)" if is_pot else "Operational"),
+            )
+            short_status = d.get(
+                "shortage_status",
+                "Confirmed Shortage" if is_conf else ("Potentially Affected" if is_pot else "No Shortage"),
+            )
+            sev_in = d.get("severed_inbound_links", d.get("severed_inbound_paths_count", 0))
+            op_in = d.get("operational_inbound_links", 0)
+            alt_stat = d.get("alternative_status", "Unknown")
+
             records.append({
                 "Entity": d.get("entity"),
-                "Status": d.get("status"),
-                "Operational Inbound": d.get("operational_inbound_links"),
-                "Severed Inbound": d.get("severed_inbound_links"),
+                "Status": status_val,
+                "Operational Status": op_status,
+                "Shortage Status": short_status,
+                "Operational Inbound": op_in,
+                "Severed Inbound": sev_in,
+                "Backup Alternatives": alt_stat,
                 "Capacity Deficit": d.get("capacity_deficit"),
                 "Alternative Sufficiency": d.get("alternative_sufficiency"),
                 "Explanation": d.get("explanation"),

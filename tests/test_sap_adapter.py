@@ -273,7 +273,7 @@ class TestSAPGraphConstructionAndAgentInterop:
         assert "Processor X" in shared_nodes
 
         # 3. Member 3: Disruption Simulation
-        disruption_result = simulate_disruption(graph, failed_node="Processor X")
+        disruption_result = simulate_disruption(graph, failed_node="Processor X", actor_role="ADMIN")
         assert disruption_result["failed_entity"] == "Processor X"
         assert "Supplier A" in disruption_result["affected_entities"]
         assert "Supplier B" in disruption_result["affected_entities"]

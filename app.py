@@ -65,6 +65,7 @@ from agents.disruption_simulation_agent import (
     DisruptionSimulationAgent,
     SUPPORTED_DISRUPTION_TYPES,
     create_synthetic_supply_chain as create_canonical_supply_chain,
+    hydrate_read_only_baseline_simulation,
     simulate_disruption,
 )
 
@@ -172,6 +173,368 @@ def shorten_run_id(run_id: str) -> str:
     return f"#RUN-{tag}"
 
 
+def get_ui_control_permissions(
+    auth_manager: AuthManager,
+    actor_username: str,
+    session_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Resolves live user role and active status directly from the authentication database
+    (preventing session-state role tampering) and returns UI & backend permission flags.
+    """
+    live_user = auth_manager.get_user_by_username(actor_username) if actor_username else None
+    if not live_user or not live_user.get("is_active"):
+        live_role = UserRole.VIEWER
+        live_username = actor_username or "Unknown"
+        is_active = False
+    else:
+        live_role = str(live_user.get("role", UserRole.VIEWER)).strip().upper()
+        live_username = live_user["username"]
+        is_active = True
+        if session_state is not None and "nexus_auth_user" in session_state:
+            session_state["nexus_auth_user"] = live_user
+
+    can_exec_sim = is_active and auth_manager.can_execute_simulation(live_role)
+    can_approve = is_active and auth_manager.can_approve_or_reject(live_role)
+    can_manage = is_active and auth_manager.can_manage_users(live_role)
+    is_viewer = (not can_exec_sim) or auth_manager.is_read_only(live_role)
+
+    nav_options = [
+        "1. 📊 Executive Dashboard",
+        "2. 🗺️ Supply Chain Map",
+        "3. 🛡️ Risk Analysis",
+        "4. ⚡ Disruption Simulator",
+        "5. 💰 Recovery Plan",
+        "6. ⚖️ Decisions & Approvals",
+        "7. 📜 Audit History",
+    ]
+    if can_manage:
+        nav_options.append("8. 👥 User Management")
+
+    return {
+        "username": live_username,
+        "role": live_role,
+        "is_active": is_active,
+        "is_viewer": is_viewer,
+        "can_execute_simulation": can_exec_sim,
+        "can_approve_or_reject": can_approve,
+        "can_manage_users": can_manage,
+        "simulation_controls_disabled": not can_exec_sim,
+        "rerun_button_disabled": not can_exec_sim,
+        "approval_buttons_disabled": not can_approve,
+        "show_user_management_nav": can_manage,
+        "nav_options": nav_options,
+        "read_only_explanation": (
+            "READ-ONLY ACCESS (VIEWER ROLE): Disruption simulator controls and the Re-run Simulation button are disabled. "
+            "You can view all 7 operational sections, existing simulation results, and reports, but cannot execute or re-run simulations, "
+            "create new simulation audit records, or approve/reject recommendations."
+            if is_viewer
+            else ""
+        ),
+    }
+
+
+def execute_authorized_simulation(
+    auth_manager: AuthManager,
+    audit_logger: AuditLogger,
+    actor_username: str,
+    graph: nx.DiGraph,
+    failed_node: str,
+    disruption_type: Optional[str] = None,
+    unit_loss: float = 150.0,
+    budget: float = 50000.0,
+    max_lead_time: int = 14,
+    allow_multi_option: bool = True,
+    execution_channel: str = "STREAMLIT",
+    session_state: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """
+    Backend-enforced simulation execution and audit logging pipeline.
+    Verifies live role permissions in the database before executing simulations or creating audit records,
+    preventing bypass via Streamlit interactions, session state mutation, or direct function calls.
+    """
+    perms = get_ui_control_permissions(auth_manager, actor_username, session_state)
+    live_role = perms["role"]
+    clean_actor = (actor_username or "").strip() or "ANONYMOUS"
+
+    if not perms["is_active"]:
+        auth_manager._record_audit_event(
+            event_type="AUTH_UNAUTHORIZED_SIMULATION_ATTEMPT",
+            actor_username=clean_actor,
+            target_username="DISRUPTION_SIMULATOR",
+            details={"reason": "Account invalid or deactivated"},
+        )
+        if session_state is not None:
+            session_state["force_new_run"] = False
+        return False, "Access denied: Account is invalid or deactivated.", None
+
+    if not auth_manager.can_execute_simulation(live_role):
+        auth_manager._record_audit_event(
+            event_type="AUTH_UNAUTHORIZED_SIMULATION_ATTEMPT",
+            actor_username=perms["username"],
+            target_username="DISRUPTION_SIMULATOR",
+            details={"role": live_role, "reason": "VIEWER role is read-only"},
+        )
+        if session_state is not None:
+            session_state["force_new_run"] = False
+        return (
+            False,
+            f"Access denied: User '{perms['username']}' with role '{live_role}' has read-only access and cannot execute or re-run simulations.",
+            None,
+        )
+    risk_findings = detect_shared_risks(graph, only_shared=False)
+    shared_only_findings = [r for r in risk_findings if r.get("is_shared")]
+    sim_result = simulate_disruption(
+        graph,
+        failed_node=failed_node,
+        disruption_type=disruption_type,
+        actor_role=live_role,
+    )
+    financial_scenario = build_financial_scenario_from_simulation(
+        simulation_result=sim_result,
+        loss_per_unit=unit_loss,
+        available_budget=budget,
+        max_lead_time_days=max_lead_time,
+        graph=graph,
+    )
+    candidate_options = generate_candidate_recovery_options(
+        scenario=financial_scenario,
+        graph=graph,
+    )
+    financial_result = optimize_recovery_plan(
+        scenario=financial_scenario,
+        recovery_options=candidate_options,
+        allow_multi_option=allow_multi_option,
+    )
+    explanation_agent = DecisionExplanationAgent()
+    decision_exp = explanation_agent.explain(
+        graph=graph,
+        disruption_result=sim_result,
+        financial_result=financial_result,
+        risk_findings=risk_findings,
+    )
+    run_id = audit_logger.record_simulation_run(
+        scenario_entity=failed_node,
+        disruption_type=sim_result.get("disruption_type", "Operational Outage"),
+        scenario_params={
+            "failed_node": failed_node,
+            "disruption_type": disruption_type,
+            "unit_loss": unit_loss,
+            "budget": budget,
+            "max_lead_time": max_lead_time,
+            "allow_multi_option": allow_multi_option,
+        },
+        sim_result=sim_result,
+        financial_result=financial_result,
+        decision_exp=decision_exp,
+        execution_channel=execution_channel,
+        actor_role=live_role,
+    )
+    return True, "Simulation executed and recorded.", {
+        "run_id": run_id,
+        "risk_findings": risk_findings,
+        "shared_only_findings": shared_only_findings,
+        "sim_result": sim_result,
+        "financial_scenario": financial_scenario,
+        "candidate_options": candidate_options,
+        "financial_result": financial_result,
+        "decision_exp": decision_exp,
+    }
+
+
+def execute_authorized_decision(
+    auth_manager: AuthManager,
+    audit_logger: AuditLogger,
+    actor_username: str,
+    run_id: str,
+    decision_type: str,
+    reviewer_label: str,
+    justification: str,
+    target_entity: str = "",
+    session_state: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str, str]:
+    """
+    Backend-enforced recommendation approval/rejection handler.
+    Queries the live authentication database before recording any governance decision.
+    """
+    perms = get_ui_control_permissions(auth_manager, actor_username, session_state)
+    live_role = perms["role"]
+    clean_actor = (actor_username or "").strip() or "ANONYMOUS"
+
+    if not perms["is_active"]:
+        auth_manager._record_audit_event(
+            event_type="AUTH_UNAUTHORIZED_APPROVAL_ATTEMPT",
+            actor_username=clean_actor,
+            target_username="GOVERNANCE_PORTAL",
+            details={"reason": "Account invalid or deactivated"},
+        )
+        return False, "Access denied: Account is invalid or deactivated.", "UNAUTHORIZED"
+
+    if not auth_manager.can_approve_or_reject(live_role):
+        auth_manager._record_audit_event(
+            event_type="AUTH_UNAUTHORIZED_APPROVAL_ATTEMPT",
+            actor_username=perms["username"],
+            target_username="GOVERNANCE_PORTAL",
+            details={"role": live_role, "reason": "VIEWER role cannot approve or reject"},
+        )
+        return (
+            False,
+            f"Access denied: User '{perms['username']}' with role '{live_role}' has read-only access and cannot approve or reject recommendations.",
+            "UNAUTHORIZED",
+        )
+
+    if not run_id or str(run_id).startswith("READ_ONLY"):
+        return False, "No active simulation run ID found to record decision.", "INVALID_RUN"
+    official_rev_label = f"{actor_username} ({live_role})"
+    if reviewer_label and reviewer_label != "Prototype Reviewer (Supply Chain Risk Analyst)":
+        official_rev_label = f"{official_rev_label} - {reviewer_label}"
+
+    success, msg, status = audit_logger.record_decision_event(
+        run_id=run_id,
+        decision_type=decision_type,
+        reviewer_label=official_rev_label,
+        justification=justification,
+        actor_role=live_role,
+    )
+    if success:
+        evt_type = (
+            "AUTH_DECISION_APPROVED"
+            if decision_type == "RECOMMENDATION_APPROVED"
+            else "AUTH_DECISION_REJECTED"
+        )
+        auth_manager._record_audit_event(
+            event_type=evt_type,
+            actor_username=actor_username,
+            target_username=target_entity or run_id,
+            details={"run_id": run_id, "justification_length": len((justification or "").strip())},
+        )
+    return success, msg, status
+
+
+def hydrate_viewer_baseline_session_state(
+    graph: nx.DiGraph,
+    audit_logger: AuditLogger,
+    session_state: Optional[Any] = None,
+    baseline_fingerprint: str = "",
+) -> Dict[str, Any]:
+    """
+    Explicit read-only baseline hydration for initial VIEWER sessions.
+    Strictly separated from user-triggered simulation execution:
+    - Uses fixed default baseline parameters (Processor X, $150/unit, $50,000 budget, 14d lead time).
+    - Never invokes RBAC-gated simulate_disruption() or audit_logger.record_simulation_run().
+    - Populates read-only session state caches so Viewer can inspect all 7 operational sections.
+    """
+    default_node = "Processor X" if "Processor X" in graph else list(graph.nodes())[0]
+    risk_findings = detect_shared_risks(graph, only_shared=False)
+    shared_only_findings = [r for r in risk_findings if r.get("is_shared")]
+    sim_result = hydrate_read_only_baseline_simulation(graph, baseline_node=default_node)
+    financial_scenario = build_financial_scenario_from_simulation(
+        simulation_result=sim_result,
+        loss_per_unit=150.0,
+        available_budget=50000.0,
+        max_lead_time_days=14,
+        graph=graph,
+    )
+    candidate_options = generate_candidate_recovery_options(
+        scenario=financial_scenario,
+        graph=graph,
+    )
+    financial_result = optimize_recovery_plan(
+        scenario=financial_scenario,
+        recovery_options=candidate_options,
+        allow_multi_option=True,
+    )
+    explanation_agent = DecisionExplanationAgent()
+    decision_exp = explanation_agent.explain(
+        graph=graph,
+        disruption_result=sim_result,
+        financial_result=financial_result,
+        risk_findings=risk_findings,
+    )
+    existing_runs = audit_logger.get_audit_runs(limit=1)
+    active_run_id = existing_runs[0]["run_id"] if existing_runs else "READ_ONLY_SIMULATION"
+
+    node_count = graph.number_of_nodes()
+    edge_count = graph.number_of_edges()
+    affected_count = len(sim_result.get("affected_entities", []))
+    rec_cost_val = financial_result.get("recovery_cost", 0.0)
+    fin_summary = (
+        f"{len(candidate_options)} Options • Unquantified"
+        if financial_result.get("is_unquantified")
+        else f"{len(candidate_options)} Options • Cost: ${rec_cost_val:,.0f}"
+    )
+    selected_ids = decision_exp.get("selected_recovery_option", {}).get("selected_ids", [])
+    strat_name = ", ".join(selected_ids) if selected_ids else "Optimal Plan"
+
+    agents_status = [
+        {
+            "id": "mapping",
+            "name": "Mapping Agent",
+            "state": "COMPLETED",
+            "duration_ms": 8.5,
+            "summary": f"{node_count} network nodes and {edge_count} dependency corridors mapped.",
+        },
+        {
+            "id": "risk",
+            "name": "Risk Detection Agent",
+            "state": "COMPLETED",
+            "duration_ms": 6.2,
+            "summary": f"{len(risk_findings)} risk findings identified, including {len(shared_only_findings)} shared bottlenecks.",
+        },
+        {
+            "id": "simulation",
+            "name": "Disruption Simulation Agent",
+            "state": "COMPLETED",
+            "duration_ms": 5.4,
+            "summary": f"Shock: {default_node} • {affected_count} Affected",
+        },
+        {
+            "id": "optimization",
+            "name": "Financial Optimization Agent",
+            "state": "COMPLETED",
+            "duration_ms": 12.0,
+            "summary": fin_summary,
+        },
+        {
+            "id": "explanation",
+            "name": "Decision Explanation Agent",
+            "state": "COMPLETED",
+            "duration_ms": 7.8,
+            "summary": f"Plan: {strat_name} • Ready",
+        },
+    ]
+    total_pipeline_ms = sum(a.get("duration_ms", 0.0) for a in agents_status)
+
+    if session_state is not None:
+        session_state["active_sim_fingerprint"] = baseline_fingerprint
+        session_state["active_run_id"] = active_run_id
+        session_state["force_new_run"] = False
+        session_state["is_read_only_baseline"] = True
+        session_state["workflow_agent_states"] = agents_status
+        session_state["workflow_total_time_ms"] = total_pipeline_ms
+        session_state["cached_graph"] = graph
+        session_state["cached_risk_findings"] = risk_findings
+        session_state["cached_shared_only_findings"] = shared_only_findings
+        session_state["cached_sim_result"] = sim_result
+        session_state["cached_financial_result"] = financial_result
+        session_state["cached_financial_scenario"] = financial_scenario
+        session_state["cached_candidate_options"] = candidate_options
+        session_state["cached_decision_exp"] = decision_exp
+
+    return {
+        "active_run_id": active_run_id,
+        "agents_status": agents_status,
+        "total_pipeline_ms": total_pipeline_ms,
+        "risk_findings": risk_findings,
+        "shared_only_findings": shared_only_findings,
+        "sim_result": sim_result,
+        "financial_scenario": financial_scenario,
+        "candidate_options": candidate_options,
+        "financial_result": financial_result,
+        "decision_exp": decision_exp,
+    }
+
+
 def run_streamlit_app() -> None:
     """Renders the comprehensive Streamlit interactive dashboard."""
     import streamlit as st
@@ -186,7 +549,7 @@ def run_streamlit_app() -> None:
 
     # Initialize Enterprise Audit and Security Authentication Managers
     audit_logger = AuditLogger()
-    auth_manager = AuthManager(db_path="data/nexus_auth.db")
+    auth_manager = AuthManager()
 
     # Session State Initialization for Authentication & RBAC
     if "nexus_auth_authenticated" not in st.session_state:
@@ -215,15 +578,17 @@ def run_streamlit_app() -> None:
             st.session_state["auth_error"] = "Your session has expired due to 30 minutes of inactivity. Please sign in again."
             st.rerun()
         else:
-            # Revalidate live account status from database
-            active_u = st.session_state.get("nexus_auth_user", {})
+            # Revalidate live account status AND live role from database on every run
+            active_u = st.session_state.get("nexus_auth_user") or {}
             u_name = active_u.get("username", "")
-            if u_name and not auth_manager.is_user_active(u_name):
+            live_u = auth_manager.get_user_by_username(u_name) if u_name else None
+            if not live_u or not live_u.get("is_active"):
                 st.session_state["nexus_auth_authenticated"] = False
                 st.session_state["nexus_auth_user"] = None
                 st.session_state["auth_error"] = "Your account has been deactivated by an administrator. Access revoked."
                 st.rerun()
             else:
+                st.session_state["nexus_auth_user"] = live_u
                 st.session_state["nexus_auth_last_activity"] = current_now
 
     # Custom CSS for dark-mode styling - Enterprise Control Tower Theme
@@ -1547,9 +1912,12 @@ def run_streamlit_app() -> None:
         unsafe_allow_html=True,
     )
 
-    # Current Authenticated User Profile Card in Sidebar
-    curr_u_name = auth_user.get("username", "Unknown")
-    curr_u_role = auth_user.get("role", "VIEWER")
+    # Current Authenticated User Profile Card in Sidebar (Resolved directly from live DB)
+    perms = get_ui_control_permissions(auth_manager, auth_user.get("username", ""), st.session_state)
+    curr_u_name = perms["username"]
+    curr_u_role = perms["role"]
+    is_viewer = perms["is_viewer"]
+    can_exec_sim = perms["can_execute_simulation"]
     role_class = {
         "ADMIN": "role-admin",
         "REVIEWER": "role-reviewer",
@@ -1581,6 +1949,8 @@ def run_streamlit_app() -> None:
         st.session_state["nexus_auth_user"] = None
         st.session_state["nexus_auth_login_time"] = None
         st.session_state["nexus_auth_last_activity"] = None
+        st.session_state.pop("active_sim_fingerprint", None)
+        st.session_state["force_new_run"] = False
         st.rerun()
 
     st.sidebar.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
@@ -1591,17 +1961,7 @@ def run_streamlit_app() -> None:
         unsafe_allow_html=True,
     )
 
-    nav_options = [
-        "1. 📊 Executive Dashboard",
-        "2. 🗺️ Supply Chain Map",
-        "3. 🛡️ Risk Analysis",
-        "4. ⚡ Disruption Simulator",
-        "5. 💰 Recovery Plan",
-        "6. ⚖️ Decisions & Approvals",
-        "7. 📜 Audit History",
-    ]
-    if curr_u_role == "ADMIN":
-        nav_options.append("8. 👥 User Management")
+    nav_options = perms["nav_options"]
 
     selected_nav = st.sidebar.radio(
         "Navigation",
@@ -1612,25 +1972,36 @@ def run_streamlit_app() -> None:
 
     st.sidebar.markdown("<div style='height: 10px; border-bottom: 1px solid rgba(56, 189, 248, 0.15); margin-bottom: 14px;'></div>", unsafe_allow_html=True)
 
-    is_viewer = (curr_u_role == "VIEWER")
-    can_exec_sim = auth_manager.can_execute_simulation(curr_u_role)
+    if is_viewer:
+        st.sidebar.markdown(
+            """
+            <div style="background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.28); border-radius:8px; padding:10px 12px; margin-bottom:12px; color:#38BDF8; font-size:0.76rem; line-height:1.4;">
+              👁️ <b>READ-ONLY ACCESS (VIEWER)</b><br>
+              <span style="color:#CBD5E1;">Disruption simulator controls and re-run actions are disabled. You can view all 7 sections, existing simulation results, and reports.</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     st.sidebar.markdown('<div class="sidebar-section-badge"><span>📂</span> 1. DATA SOURCE & TELEMETRY</div>', unsafe_allow_html=True)
 
     sap_is_ready = is_sap_configured()
     default_dataset_idx = 0 if sap_is_ready else 1
+    data_source_options = [
+        "SAP HANA Cloud (Live Database: HACKFEST0316)",
+        "Standard Sample (data/dependencies.csv)",
+        "Canonical Multi-Tier Network (with Factories & Routes)",
+        "Upload Custom Dependencies CSV",
+    ]
 
     data_choice = st.sidebar.radio(
         "Choose Supply Chain Data Source:",
-        [
-            "SAP HANA Cloud (Live Database: HACKFEST0316)",
-            "Standard Sample (data/dependencies.csv)",
-            "Canonical Multi-Tier Network (with Factories & Routes)",
-            "Upload Custom Dependencies CSV",
-        ],
+        data_source_options,
         index=default_dataset_idx,
-        disabled=is_viewer,
+        disabled=perms["simulation_controls_disabled"],
     )
+    if not can_exec_sim:
+        data_choice = data_source_options[default_dataset_idx]
 
     graph: nx.DiGraph
     data_source_name: str = ""
@@ -1704,6 +2075,7 @@ def run_streamlit_app() -> None:
         uploaded_file = st.sidebar.file_uploader(
             "Upload CSV (must contain upstream_node, downstream_node, material, capacity)",
             type=["csv"],
+            disabled=perms["simulation_controls_disabled"],
         )
         if uploaded_file is not None:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
@@ -1799,18 +2171,30 @@ def run_streamlit_app() -> None:
 
     st.sidebar.markdown("---")
     st.sidebar.markdown('<div class="sidebar-section-badge"><span>📜</span> 4. GOVERNANCE & AUDIT</div>', unsafe_allow_html=True)
-    is_viewer = (curr_u_role == "VIEWER")
     if st.sidebar.button(
         "🔁 Re-run Simulation (New Audit Record)",
         key="btn_rerun_simulation",
-        disabled=is_viewer,
+        disabled=perms["rerun_button_disabled"],
         help="Disabled for read-only VIEWER accounts." if is_viewer else "Starts an intentional new simulation run with identical parameters, minting a distinct Run ID and audit record."
     ):
-        if is_viewer or not auth_manager.can_execute_simulation(curr_u_role):
-            st.sidebar.error("Permission Denied: VIEWER role cannot execute disruption simulations.")
+        live_sim_perms = get_ui_control_permissions(auth_manager, curr_u_name, st.session_state)
+        if not live_sim_perms["is_active"] or not auth_manager.can_execute_simulation(live_sim_perms["role"]):
+            auth_manager._record_audit_event(
+                event_type="AUTH_UNAUTHORIZED_SIMULATION_ATTEMPT",
+                actor_username=curr_u_name or "ANONYMOUS",
+                target_username="DISRUPTION_SIMULATOR",
+                details={"role": live_sim_perms["role"], "reason": "VIEWER role is read-only"},
+            )
+            st.sidebar.error(
+                f"Access denied: User '{curr_u_name}' with role '{live_sim_perms['role']}' has read-only access and cannot execute or re-run simulations."
+            )
+            st.session_state["force_new_run"] = False
         else:
             st.session_state["force_new_run"] = True
             st.session_state["audit_justification_field"] = ""
+
+    if is_viewer:
+        st.sidebar.caption("🔒 Re-run Simulation is disabled for VIEWER accounts (read-only access).")
 
     # =========================================================================
     # Five-Agent Pipeline Orchestration & Enterprise Masthead
@@ -1821,7 +2205,36 @@ def run_streamlit_app() -> None:
         f"{unit_loss_input:.1f}|{budget_input:.1f}|{max_lead_time_input}|{allow_multi_option}"
     )
     force_new = st.session_state.get("force_new_run", False)
-    is_new_run = force_new or (st.session_state.get("active_sim_fingerprint") != sim_fingerprint)
+
+    # Backend enforcement: Explicitly separate read-only VIEWER baseline hydration from authorized simulation execution
+    if not can_exec_sim:
+        if force_new:
+            auth_manager._record_audit_event(
+                event_type="AUTH_UNAUTHORIZED_SIMULATION_ATTEMPT",
+                actor_username=curr_u_name or "ANONYMOUS",
+                target_username="DISRUPTION_SIMULATOR",
+                details={"role": curr_u_role, "reason": "VIEWER role is read-only"},
+            )
+            st.sidebar.error(
+                f"Access denied: User '{curr_u_name}' with role '{curr_u_role}' has read-only access and cannot execute or re-run simulations."
+            )
+            st.session_state["force_new_run"] = False
+            force_new = False
+        # Viewer never executes a simulation; only hydrates read-only baseline if session cache is empty
+        should_execute_simulation = False
+        should_hydrate_viewer_baseline = ("cached_sim_result" not in st.session_state)
+    else:
+        # If switching from a read-only viewer session to an authorized Reviewer/Admin session, allow fresh run
+        was_read_only_run = (
+            str(st.session_state.get("active_run_id", "")).startswith("READ_ONLY")
+            or bool(st.session_state.get("is_read_only_baseline", False))
+        )
+        should_execute_simulation = (
+            force_new
+            or was_read_only_run
+            or (st.session_state.get("active_sim_fingerprint") != sim_fingerprint)
+        )
+        should_hydrate_viewer_baseline = False
 
     # 1. Masthead Header & Enterprise Telemetry
     if is_sap_active:
@@ -1887,188 +2300,213 @@ FIVE RESILIENCE AGENTS SYNCHRONIZED
     initial_corridor_label = passed_disruption_type or "Operational Outage"
     masthead_placeholder.markdown(render_control_masthead(initial_corridor_label), unsafe_allow_html=True)
 
-    # 2. Sequential Agent Execution (Live Orchestration vs Cached Recovery)
-    if is_new_run:
-        agents_status = [
-            {"id": "mapping", "name": "Mapping Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
-            {"id": "risk", "name": "Risk Detection Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
-            {"id": "simulation", "name": "Disruption Simulation Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
-            {"id": "optimization", "name": "Financial Optimization Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
-            {"id": "explanation", "name": "Decision Explanation Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
-        ]
-
-        # ── Step 1: Mapping Agent (Blue) ──
-        agents_status[0]["state"] = "PROCESSING"
-        workflow_placeholder.markdown(
-            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=0),
-            unsafe_allow_html=True,
-        )
-        t0 = time.perf_counter()
-        node_count = graph.number_of_nodes()
-        edge_count = graph.number_of_edges()
-        t1 = time.perf_counter()
-        mapping_ms = max((t1 - t0) * 1000.0, 8.5)
-        agents_status[0]["state"] = "COMPLETED"
-        agents_status[0]["duration_ms"] = mapping_ms
-        agents_status[0]["summary"] = f"{node_count} network nodes and {edge_count} dependency corridors mapped."
-        workflow_placeholder.markdown(
-            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=0),
-            unsafe_allow_html=True,
-        )
-        time.sleep(0.12)
-
-        # ── Step 2: Risk Detection Agent (Cyan) ──
-        agents_status[1]["state"] = "PROCESSING"
-        workflow_placeholder.markdown(
-            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=1),
-            unsafe_allow_html=True,
-        )
-        t0 = time.perf_counter()
-        try:
-            risk_findings = detect_shared_risks(graph, only_shared=False)
-            shared_only_findings = [r for r in risk_findings if r.get("is_shared")]
-            t1 = time.perf_counter()
-            risk_ms = max((t1 - t0) * 1000.0, 6.2)
-            agents_status[1]["state"] = "COMPLETED"
-            agents_status[1]["duration_ms"] = risk_ms
-            agents_status[1]["summary"] = f"{len(risk_findings)} risk findings identified, including {len(shared_only_findings)} shared bottlenecks."
-        except Exception as exc:
-            agents_status[1]["state"] = "ERROR"
-            agents_status[1]["error"] = str(exc)
-            risk_findings, shared_only_findings = [], []
-            workflow_placeholder.markdown(render_five_agent_workflow_panel(agents_status), unsafe_allow_html=True)
-            st.error(f"Risk Detection Agent failed: {exc}")
-            return
-        workflow_placeholder.markdown(
-            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=1),
-            unsafe_allow_html=True,
-        )
-        time.sleep(0.12)
-
-        # ── Step 3: Disruption Simulation Agent (Amber) ──
-        agents_status[2]["state"] = "PROCESSING"
-        workflow_placeholder.markdown(
-            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=2),
-            unsafe_allow_html=True,
-        )
-        t0 = time.perf_counter()
-        try:
-            sim_result = simulate_disruption(
-                graph,
-                failed_node=selected_failed_node,
-                disruption_type=passed_disruption_type,
+    # 2. Sequential Agent Execution (Authorized Live Execution vs Read-Only Baseline Hydration vs Cached Recovery)
+    if should_execute_simulation:
+        live_sim_perms = get_ui_control_permissions(auth_manager, curr_u_name, st.session_state)
+        if not live_sim_perms["is_active"] or not auth_manager.can_execute_simulation(live_sim_perms["role"]):
+            auth_manager._record_audit_event(
+                event_type="AUTH_UNAUTHORIZED_SIMULATION_ATTEMPT",
+                actor_username=curr_u_name or "ANONYMOUS",
+                target_username="DISRUPTION_SIMULATOR",
+                details={"role": live_sim_perms["role"], "reason": "VIEWER role is read-only"},
             )
-            t1 = time.perf_counter()
-            sim_ms = max((t1 - t0) * 1000.0, 5.4)
-            agents_status[2]["state"] = "COMPLETED"
-            agents_status[2]["duration_ms"] = sim_ms
-            affected_count = len(sim_result.get("affected_entities", []))
-            agents_status[2]["summary"] = f"Shock: {selected_failed_node} • {affected_count} Affected"
-            actual_corridor_label = sim_result.get("disruption_type", "Operational Outage")
-            masthead_placeholder.markdown(render_control_masthead(actual_corridor_label), unsafe_allow_html=True)
-        except Exception as exc:
-            agents_status[2]["state"] = "ERROR"
-            agents_status[2]["error"] = str(exc)
-            workflow_placeholder.markdown(render_five_agent_workflow_panel(agents_status), unsafe_allow_html=True)
-            st.error(f"Disruption Simulation Agent failed: {exc}")
-            return
-        workflow_placeholder.markdown(
-            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=2),
-            unsafe_allow_html=True,
-        )
-        time.sleep(0.12)
-
-        # ── Step 4: Financial Optimization Agent (Green) ──
-        agents_status[3]["state"] = "PROCESSING"
-        workflow_placeholder.markdown(
-            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=3),
-            unsafe_allow_html=True,
-        )
-        t0 = time.perf_counter()
-        try:
-            financial_scenario = build_financial_scenario_from_simulation(
-                simulation_result=sim_result,
-                loss_per_unit=unit_loss_input,
-                available_budget=budget_input,
-                max_lead_time_days=max_lead_time_input,
+            st.error(
+                f"Access denied: User '{curr_u_name}' with role '{live_sim_perms['role']}' has read-only access and cannot execute or re-run simulations."
+            )
+            hydrated = hydrate_viewer_baseline_session_state(
                 graph=graph,
+                audit_logger=audit_logger,
+                session_state=st.session_state,
+                baseline_fingerprint=sim_fingerprint,
             )
-            candidate_options = generate_candidate_recovery_options(
-                scenario=financial_scenario,
-                graph=graph,
-            )
-            financial_result = optimize_recovery_plan(
-                scenario=financial_scenario,
-                recovery_options=candidate_options,
-                allow_multi_option=allow_multi_option,
-            )
-            t1 = time.perf_counter()
-            fin_ms = max((t1 - t0) * 1000.0, 12.0)
-            agents_status[3]["state"] = "COMPLETED"
-            agents_status[3]["duration_ms"] = fin_ms
-            rec_cost_val = financial_result.get("recovery_cost", 0.0)
-            if financial_result.get("is_unquantified"):
-                fin_summary = f"{len(candidate_options)} Options • Unquantified"
-            else:
-                fin_summary = f"{len(candidate_options)} Options • Cost: ${rec_cost_val:,.0f}"
-            agents_status[3]["summary"] = fin_summary
-        except Exception as exc:
-            agents_status[3]["state"] = "ERROR"
-            agents_status[3]["error"] = str(exc)
-            workflow_placeholder.markdown(render_five_agent_workflow_panel(agents_status), unsafe_allow_html=True)
-            st.error(f"Financial Optimization Agent failed: {exc}")
-            return
-        workflow_placeholder.markdown(
-            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=3),
-            unsafe_allow_html=True,
-        )
-        time.sleep(0.12)
-
-        # ── Step 5: Decision Explanation Agent (Purple) ──
-        agents_status[4]["state"] = "PROCESSING"
-        workflow_placeholder.markdown(
-            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=4),
-            unsafe_allow_html=True,
-        )
-        t0 = time.perf_counter()
-        try:
-            explanation_agent = DecisionExplanationAgent()
-            decision_exp = explanation_agent.explain(
-                graph=graph,
-                disruption_result=sim_result,
-                financial_result=financial_result,
-                risk_findings=risk_findings,
-            )
-            t1 = time.perf_counter()
-            exp_ms = max((t1 - t0) * 1000.0, 7.8)
-            agents_status[4]["state"] = "COMPLETED"
-            agents_status[4]["duration_ms"] = exp_ms
-            selected_ids = decision_exp.get("selected_recovery_option", {}).get("selected_ids", [])
-            strat_name = ", ".join(selected_ids) if selected_ids else "Optimal Plan"
-            agents_status[4]["summary"] = f"Plan: {strat_name} • Ready"
-        except Exception as exc:
-            agents_status[4]["state"] = "ERROR"
-            agents_status[4]["error"] = str(exc)
-            workflow_placeholder.markdown(render_five_agent_workflow_panel(agents_status), unsafe_allow_html=True)
-            st.error(f"Decision Explanation Agent failed: {exc}")
-            return
-        workflow_placeholder.markdown(
-            render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=4),
-            unsafe_allow_html=True,
-        )
-        time.sleep(0.08)
-
-        total_pipeline_ms = sum(a.get("duration_ms", 0.0) for a in agents_status)
-
-        # Audit Logging (Write operations strictly restricted to ADMIN and REVIEWER)
-        audit_logger = AuditLogger()
-        if force_new:
-            st.session_state["audit_justification_field"] = ""
-
-        if not auth_manager.can_execute_simulation(curr_u_role):
-            # Read-only Viewer cannot execute write operations or mint new audit records
-            active_run_id = st.session_state.get("active_run_id", "READ_ONLY_SIMULATION")
+            agents_status = hydrated["agents_status"]
+            total_pipeline_ms = hydrated["total_pipeline_ms"]
+            active_run_id = hydrated["active_run_id"]
+            risk_findings = hydrated["risk_findings"]
+            shared_only_findings = hydrated["shared_only_findings"]
+            sim_result = hydrated["sim_result"]
+            financial_scenario = hydrated["financial_scenario"]
+            candidate_options = hydrated["candidate_options"]
+            financial_result = hydrated["financial_result"]
+            decision_exp = hydrated["decision_exp"]
         else:
+            agents_status = [
+                {"id": "mapping", "name": "Mapping Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
+                {"id": "risk", "name": "Risk Detection Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
+                {"id": "simulation", "name": "Disruption Simulation Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
+                {"id": "optimization", "name": "Financial Optimization Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
+                {"id": "explanation", "name": "Decision Explanation Agent", "state": "WAITING", "duration_ms": 0.0, "summary": ""},
+            ]
+
+            # ── Step 1: Mapping Agent (Blue) ──
+            agents_status[0]["state"] = "PROCESSING"
+            workflow_placeholder.markdown(
+                render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=0),
+                unsafe_allow_html=True,
+            )
+            t0 = time.perf_counter()
+            node_count = graph.number_of_nodes()
+            edge_count = graph.number_of_edges()
+            t1 = time.perf_counter()
+            mapping_ms = max((t1 - t0) * 1000.0, 8.5)
+            agents_status[0]["state"] = "COMPLETED"
+            agents_status[0]["duration_ms"] = mapping_ms
+            agents_status[0]["summary"] = f"{node_count} network nodes and {edge_count} dependency corridors mapped."
+            workflow_placeholder.markdown(
+                render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=0),
+                unsafe_allow_html=True,
+            )
+            time.sleep(0.12)
+
+            # ── Step 2: Risk Detection Agent (Cyan) ──
+            agents_status[1]["state"] = "PROCESSING"
+            workflow_placeholder.markdown(
+                render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=1),
+                unsafe_allow_html=True,
+            )
+            t0 = time.perf_counter()
+            try:
+                risk_findings = detect_shared_risks(graph, only_shared=False)
+                shared_only_findings = [r for r in risk_findings if r.get("is_shared")]
+                t1 = time.perf_counter()
+                risk_ms = max((t1 - t0) * 1000.0, 6.2)
+                agents_status[1]["state"] = "COMPLETED"
+                agents_status[1]["duration_ms"] = risk_ms
+                agents_status[1]["summary"] = f"{len(risk_findings)} risk findings identified, including {len(shared_only_findings)} shared bottlenecks."
+            except Exception as exc:
+                agents_status[1]["state"] = "ERROR"
+                agents_status[1]["error"] = str(exc)
+                risk_findings, shared_only_findings = [], []
+                workflow_placeholder.markdown(render_five_agent_workflow_panel(agents_status), unsafe_allow_html=True)
+                st.error(f"Risk Detection Agent failed: {exc}")
+                return
+            workflow_placeholder.markdown(
+                render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=1),
+                unsafe_allow_html=True,
+            )
+            time.sleep(0.12)
+
+            # ── Step 3: Disruption Simulation Agent (Amber) ──
+            agents_status[2]["state"] = "PROCESSING"
+            workflow_placeholder.markdown(
+                render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=2),
+                unsafe_allow_html=True,
+            )
+            t0 = time.perf_counter()
+            try:
+                sim_result = simulate_disruption(
+                    graph,
+                    failed_node=selected_failed_node,
+                    disruption_type=passed_disruption_type,
+                    actor_role=live_sim_perms["role"],
+                )
+                t1 = time.perf_counter()
+                sim_ms = max((t1 - t0) * 1000.0, 5.4)
+                agents_status[2]["state"] = "COMPLETED"
+                agents_status[2]["duration_ms"] = sim_ms
+                affected_count = len(sim_result.get("affected_entities", []))
+                agents_status[2]["summary"] = f"Shock: {selected_failed_node} • {affected_count} Affected"
+                actual_corridor_label = sim_result.get("disruption_type", "Operational Outage")
+                masthead_placeholder.markdown(render_control_masthead(actual_corridor_label), unsafe_allow_html=True)
+            except Exception as exc:
+                agents_status[2]["state"] = "ERROR"
+                agents_status[2]["error"] = str(exc)
+                workflow_placeholder.markdown(render_five_agent_workflow_panel(agents_status), unsafe_allow_html=True)
+                st.error(f"Disruption Simulation Agent failed: {exc}")
+                return
+            workflow_placeholder.markdown(
+                render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=2),
+                unsafe_allow_html=True,
+            )
+            time.sleep(0.12)
+
+            # ── Step 4: Financial Optimization Agent (Green) ──
+            agents_status[3]["state"] = "PROCESSING"
+            workflow_placeholder.markdown(
+                render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=3),
+                unsafe_allow_html=True,
+            )
+            t0 = time.perf_counter()
+            try:
+                financial_scenario = build_financial_scenario_from_simulation(
+                    simulation_result=sim_result,
+                    loss_per_unit=unit_loss_input,
+                    available_budget=budget_input,
+                    max_lead_time_days=max_lead_time_input,
+                    graph=graph,
+                )
+                candidate_options = generate_candidate_recovery_options(
+                    scenario=financial_scenario,
+                    graph=graph,
+                )
+                financial_result = optimize_recovery_plan(
+                    scenario=financial_scenario,
+                    recovery_options=candidate_options,
+                    allow_multi_option=allow_multi_option,
+                )
+                t1 = time.perf_counter()
+                fin_ms = max((t1 - t0) * 1000.0, 12.0)
+                agents_status[3]["state"] = "COMPLETED"
+                agents_status[3]["duration_ms"] = fin_ms
+                rec_cost_val = financial_result.get("recovery_cost", 0.0)
+                if financial_result.get("is_unquantified"):
+                    fin_summary = f"{len(candidate_options)} Options • Unquantified"
+                else:
+                    fin_summary = f"{len(candidate_options)} Options • Cost: ${rec_cost_val:,.0f}"
+                agents_status[3]["summary"] = fin_summary
+            except Exception as exc:
+                agents_status[3]["state"] = "ERROR"
+                agents_status[3]["error"] = str(exc)
+                workflow_placeholder.markdown(render_five_agent_workflow_panel(agents_status), unsafe_allow_html=True)
+                st.error(f"Financial Optimization Agent failed: {exc}")
+                return
+            workflow_placeholder.markdown(
+                render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=3),
+                unsafe_allow_html=True,
+            )
+            time.sleep(0.12)
+
+            # ── Step 5: Decision Explanation Agent (Purple) ──
+            agents_status[4]["state"] = "PROCESSING"
+            workflow_placeholder.markdown(
+                render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=4),
+                unsafe_allow_html=True,
+            )
+            t0 = time.perf_counter()
+            try:
+                explanation_agent = DecisionExplanationAgent()
+                decision_exp = explanation_agent.explain(
+                    graph=graph,
+                    disruption_result=sim_result,
+                    financial_result=financial_result,
+                    risk_findings=risk_findings,
+                )
+                t1 = time.perf_counter()
+                exp_ms = max((t1 - t0) * 1000.0, 7.8)
+                agents_status[4]["state"] = "COMPLETED"
+                agents_status[4]["duration_ms"] = exp_ms
+                selected_ids = decision_exp.get("selected_recovery_option", {}).get("selected_ids", [])
+                strat_name = ", ".join(selected_ids) if selected_ids else "Optimal Plan"
+                agents_status[4]["summary"] = f"Plan: {strat_name} • Ready"
+            except Exception as exc:
+                agents_status[4]["state"] = "ERROR"
+                agents_status[4]["error"] = str(exc)
+                workflow_placeholder.markdown(render_five_agent_workflow_panel(agents_status), unsafe_allow_html=True)
+                st.error(f"Decision Explanation Agent failed: {exc}")
+                return
+            workflow_placeholder.markdown(
+                render_five_agent_workflow_panel(agents_status, is_live_executing=True, current_agent_idx=4),
+                unsafe_allow_html=True,
+            )
+            time.sleep(0.08)
+
+            total_pipeline_ms = sum(a.get("duration_ms", 0.0) for a in agents_status)
+
+            # Audit Logging (Write operations strictly restricted to ADMIN and REVIEWER)
+            audit_logger = AuditLogger()
+            if force_new:
+                st.session_state["audit_justification_field"] = ""
+
             active_run_id = audit_logger.record_simulation_run(
                 scenario_entity=selected_failed_node,
                 disruption_type=sim_result.get("disruption_type", "Operational Outage"),
@@ -2084,24 +2522,46 @@ FIVE RESILIENCE AGENTS SYNCHRONIZED
                 financial_result=financial_result,
                 decision_exp=decision_exp,
                 execution_channel="STREAMLIT",
+                actor_role=live_sim_perms["role"],
             )
-        st.session_state["active_sim_fingerprint"] = sim_fingerprint
-        st.session_state["active_run_id"] = active_run_id
-        st.session_state["force_new_run"] = False
+            st.session_state["active_sim_fingerprint"] = sim_fingerprint
+            st.session_state["active_run_id"] = active_run_id
+            st.session_state["force_new_run"] = False
+            st.session_state["is_read_only_baseline"] = False
 
-        # Persist session state caches
-        st.session_state["workflow_agent_states"] = agents_status
-        st.session_state["workflow_total_time_ms"] = total_pipeline_ms
-        st.session_state["cached_graph"] = graph
-        st.session_state["cached_risk_findings"] = risk_findings
-        st.session_state["cached_shared_only_findings"] = shared_only_findings
-        st.session_state["cached_sim_result"] = sim_result
-        st.session_state["cached_financial_result"] = financial_result
-        st.session_state["cached_financial_scenario"] = financial_scenario
-        st.session_state["cached_candidate_options"] = candidate_options
-        st.session_state["cached_decision_exp"] = decision_exp
+            # Persist session state caches
+            st.session_state["workflow_agent_states"] = agents_status
+            st.session_state["workflow_total_time_ms"] = total_pipeline_ms
+            st.session_state["cached_graph"] = graph
+            st.session_state["cached_risk_findings"] = risk_findings
+            st.session_state["cached_shared_only_findings"] = shared_only_findings
+            st.session_state["cached_sim_result"] = sim_result
+            st.session_state["cached_financial_result"] = financial_result
+            st.session_state["cached_financial_scenario"] = financial_scenario
+            st.session_state["cached_candidate_options"] = candidate_options
+            st.session_state["cached_decision_exp"] = decision_exp
 
         workflow_placeholder.empty()
+
+    elif should_hydrate_viewer_baseline:
+        hydrated = hydrate_viewer_baseline_session_state(
+            graph=graph,
+            audit_logger=audit_logger,
+            session_state=st.session_state,
+            baseline_fingerprint=sim_fingerprint,
+        )
+        agents_status = hydrated["agents_status"]
+        total_pipeline_ms = hydrated["total_pipeline_ms"]
+        active_run_id = hydrated["active_run_id"]
+        risk_findings = hydrated["risk_findings"]
+        shared_only_findings = hydrated["shared_only_findings"]
+        sim_result = hydrated["sim_result"]
+        financial_scenario = hydrated["financial_scenario"]
+        candidate_options = hydrated["candidate_options"]
+        financial_result = hydrated["financial_result"]
+        decision_exp = hydrated["decision_exp"]
+        actual_corridor_label = sim_result.get("disruption_type", "Operational Outage")
+        masthead_placeholder.markdown(render_control_masthead(actual_corridor_label), unsafe_allow_html=True)
 
     else:
         # Load from session cache for instantaneous tab navigation (0ms delay)
@@ -2669,6 +3129,16 @@ FIVE RESILIENCE AGENTS SYNCHRONIZED
             unsafe_allow_html=True,
         )
 
+        if is_viewer:
+            st.markdown(
+                """
+                <div style="background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.28); border-radius:8px; padding:12px 16px; margin-bottom:14px; color:#38BDF8; font-size:0.82rem; line-height:1.45;">
+                  👁️ <b>READ-ONLY ACCESS (VIEWER ROLE):</b> Disruption Simulator configuration controls and the <b>Re-run Simulation</b> button are disabled for your account. You can view the simulation results, blast-radius propagation, and downstream shortage reports below, but you cannot execute or re-run simulations or create new simulation audit records.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
         cap_impact = sim_result.get("estimated_capacity_impact", {})
         direct_cap_val = cap_impact.get("estimated_direct_capacity_loss")
         direct_cap_str = safe_format_capacity(direct_cap_val, default="Not available", decimals=1, unit=" units")
@@ -2910,12 +3380,33 @@ FIVE RESILIENCE AGENTS SYNCHRONIZED
             shortage_cards_html = []
             for item in entity_details:
                 ent_name = item.get("entity", "Unknown")
-                c_short = item.get("confirmed_shortage", False)
-                p_aff = item.get("potentially_affected", False)
-                sev_paths = item.get("severed_inbound_paths_count", 0)
-                alt_status = item.get("alternative_status", "Unknown")
-                badge = '<span class="badge-critical">CONFIRMED SHORTAGE</span>' if c_short else ('<span class="badge-high">POTENTIALLY AFFECTED</span>' if p_aff else '<span class="badge-low">OPERATIONAL</span>')
+                status_val = item.get("status", "")
+                c_short = bool(status_val == "confirmed_shortage" or item.get("confirmed_shortage", False))
+                p_aff = bool(status_val == "potentially_affected" or item.get("potentially_affected", False))
+                sev_paths = item.get("severed_inbound_links", item.get("severed_inbound_paths_count", 0))
+                op_paths = item.get("operational_inbound_links", 0)
+                op_status = item.get(
+                    "operational_status",
+                    "Operational (Inbound Supply Starved)"
+                    if c_short
+                    else ("Operational (Partial / Redundant Inbound)" if p_aff else "Operational"),
+                )
+                short_status = item.get(
+                    "shortage_status",
+                    "Confirmed Shortage" if c_short else ("Potentially Affected" if p_aff else "No Shortage"),
+                )
+                alt_status = item.get("alternative_status") or "Unknown"
+                badge = (
+                    '<span class="badge-critical">CONFIRMED SHORTAGE</span>'
+                    if c_short
+                    else (
+                        '<span class="badge-high">POTENTIALLY AFFECTED</span>'
+                        if p_aff
+                        else '<span class="badge-low">OPERATIONAL</span>'
+                    )
+                )
                 border_c = "#F43F5E" if c_short else ("#F59E0B" if p_aff else "#10B981")
+                short_color = "#FB7185" if c_short else ("#FBBF24" if p_aff else "#34D399")
 
                 shortage_cards_html.append(
                     f'<div style="background:#151F32; border:1px solid #1E293B; border-top:3px solid {border_c}; border-radius:8px; padding:12px 14px; margin-bottom:10px;">'
@@ -2923,8 +3414,11 @@ FIVE RESILIENCE AGENTS SYNCHRONIZED
                     f'<span style="font-weight:700; color:#F8FAFC; font-size:0.95rem;">{ent_name}</span>'
                     f'{badge}'
                     f'</div>'
-                    f'<div style="font-size:0.78rem; color:#94A3B8;">'
+                    f'<div style="font-size:0.78rem; color:#94A3B8; line-height:1.5;">'
+                    f'<b>Operational Status:</b> <span style="color:#CBD5E1;">{op_status}</span> &nbsp;&bull;&nbsp; '
+                    f'<b>Shortage Status:</b> <span style="color:{short_color}; font-weight:600;">{short_status}</span><br>'
                     f'<b>Severed Inbound Paths:</b> <span style="color:#F8FAFC;">{sev_paths}</span> &nbsp;&bull;&nbsp; '
+                    f'<b>Operational Inbound Paths:</b> <span style="color:#F8FAFC;">{op_paths}</span> &nbsp;&bull;&nbsp; '
                     f'<b>Backup Alternatives:</b> <span style="color:#CBD5E1;">{alt_status}</span>'
                     f'</div>'
                     f'</div>'
@@ -2945,7 +3439,7 @@ FIVE RESILIENCE AGENTS SYNCHRONIZED
             <div class="section-header-banner">
               <div>
                 <div class="section-header-title">💰 Recovery Plan & Financial Optimization</div>
-                <div class="section-header-desc">Mathematically selects the lowest-cost recovery plan satisfying budget, capacity, and lead-time constraints.</div>
+                <div class="section-header-desc">Evaluates available recovery options and selects the lowest-cost feasible recovery plan satisfying configured budget, capacity, and lead-time constraints.</div>
               </div>
             </div>
             """,
@@ -2980,11 +3474,11 @@ FIVE RESILIENCE AGENTS SYNCHRONIZED
                 "#34D399" if not is_unquantified else "#FB7185",
             )
             + render_kpi_card(
-                "Residual Risk",
+                "MODELLED RESIDUAL LOSS",
                 residual_loss_disp,
                 "⚠️",
                 "kpi-card-glow-amber",
-                "Remaining financial revenue exposure after executing all recovery actions.",
+                "Modelled financial loss after applying the selected recovery option. Actual operational residual risk cannot be confirmed because verified backup inventory and alternative-supplier capacity data are unavailable.",
                 "#FBBF24" if not is_unquantified else "#FB7185",
             )
             + '</div>'
@@ -3012,9 +3506,10 @@ FIVE RESILIENCE AGENTS SYNCHRONIZED
             st.markdown(
                 f"""
                 <div style="background:#064E3B; border:1px solid #059669; border-radius:8px; padding:14px 18px; margin-bottom:12px;">
-                  <div style="font-size:0.75rem; color:#A7F3D0; font-weight:700; text-transform:uppercase; letter-spacing:0.05em;">Mathematically Optimal Recovery Strategy</div>
+                  <div style="font-size:0.75rem; color:#A7F3D0; font-weight:700; text-transform:uppercase; letter-spacing:0.05em;">LOWEST-COST FEASIBLE RECOVERY STRATEGY</div>
                   <div style="font-size:1.25rem; font-weight:800; color:#F0FDF4; margin:4px 0;">{', '.join(rec_titles)} <span style="font-size:0.80rem; color:#A7F3D0; font-family:monospace;">({', '.join(rec_ids)})</span></div>
-                  <span style="color:#A7F3D0; font-size:0.85rem;">Plan Expenditure: <b>{total_cost_str}</b> &nbsp;|&nbsp; Net Capital Preserved: <b style="color:#6EE7B7;">{net_savings_str}</b></span>
+                  <span style="color:#A7F3D0; font-size:0.85rem;">Plan Expenditure: <b>{total_cost_str}</b> &nbsp;|&nbsp; Net Capital Preserved: <b style="color:#6EE7B7;">{net_savings_str}</b> &nbsp;|&nbsp; Modelled Residual Loss: <b>{residual_loss_disp}</b></span>
+                  <div style="color:#D1FAE5; font-size:0.78rem; margin-top:6px;">Evaluates available recovery options in the recovery catalogue and selects the lowest-cost option satisfying configured budget, capacity, and lead-time constraints. Modelled Residual Loss represents modelled financial loss after applying the selected recovery option; actual operational residual risk cannot be confirmed because verified backup inventory and alternative-supplier capacity data are unavailable.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -3032,7 +3527,7 @@ FIVE RESILIENCE AGENTS SYNCHRONIZED
                 opt_id = f.get("option_id", "Unknown")
                 is_rec = opt_id in rec_ids
                 opt_name = translate_option_id(opt_id)
-                rec_badge = '<span style="background:rgba(16,185,129,0.18); color:#34D399; border:1px solid rgba(16,185,129,0.4); padding:3px 10px; border-radius:12px; font-size:0.74rem; font-weight:700;">⭐ MATHEMATICALLY RECOMMENDED</span>' if is_rec else '<span class="badge-low">FEASIBLE OPTION</span>'
+                rec_badge = '<span style="background:rgba(16,185,129,0.18); color:#34D399; border:1px solid rgba(16,185,129,0.4); padding:3px 10px; border-radius:12px; font-size:0.74rem; font-weight:700;">⭐ LOWEST-COST FEASIBLE OPTION</span>' if is_rec else '<span class="badge-low">FEASIBLE OPTION</span>'
                 card_border = "#10B981" if is_rec else "#334155"
                 cost_s = safe_format_currency(f.get("recovery_cost"), default="Unknown", decimals=0)
                 cap_s = safe_format_capacity(f.get("available_capacity"), default="Unknown", decimals=0, unit=" units")
@@ -3226,6 +3721,7 @@ Strategy: <span style="color:#2DD4BF;">{rec_display_str}</span>
                 value="Prototype Reviewer (Supply Chain Risk Analyst)",
                 help="Designation recorded in the immutable audit event.",
                 key="audit_reviewer_label_field",
+                disabled=perms["approval_buttons_disabled"],
             )
         with gov_col2:
             justification_input = st.text_area(
@@ -3234,10 +3730,10 @@ Strategy: <span style="color:#2DD4BF;">{rec_display_str}</span>
                 help="Mandatory for rejection, recommended for approval.",
                 key="audit_justification_field",
                 height=70,
+                disabled=perms["approval_buttons_disabled"],
             )
 
         # Backend Role Authorization Enforcement
-        is_viewer = (curr_u_role == "VIEWER")
         if is_viewer:
             st.markdown(
                 '''
@@ -3254,7 +3750,7 @@ Strategy: <span style="color:#2DD4BF;">{rec_display_str}</span>
                 "Approve Recommendation",
                 key="btn_approve_recommendation",
                 use_container_width=True,
-                disabled=is_viewer,
+                disabled=perms["approval_buttons_disabled"],
                 help="Requires ADMIN or REVIEWER role." if is_viewer else "Records official approval."
             )
         with btn_col2:
@@ -3262,77 +3758,47 @@ Strategy: <span style="color:#2DD4BF;">{rec_display_str}</span>
                 "Reject Recommendation",
                 key="btn_reject_recommendation",
                 use_container_width=True,
-                disabled=is_viewer,
+                disabled=perms["approval_buttons_disabled"],
                 help="Requires ADMIN or REVIEWER role." if is_viewer else "Records official rejection."
             )
 
         if approve_clicked:
-            # Backend Enforcement 1: Re-validate active session & account status
-            if not auth_manager.is_user_active(curr_u_name):
-                st.error("Authentication error: Your account is deactivated. Access revoked.")
-            # Backend Enforcement 2: Role Authorization (Viewer cannot approve)
-            elif not auth_manager.can_approve_or_reject(curr_u_role):
-                st.error(f"Unauthorized: User '{curr_u_name}' with role '{curr_u_role}' is not permitted to approve recovery plans.")
-            elif not active_run_id:
-                st.error("No active simulation run ID found to approve.")
+            success, msg, _ = execute_authorized_decision(
+                auth_manager=auth_manager,
+                audit_logger=audit_logger,
+                actor_username=curr_u_name,
+                run_id=active_run_id,
+                decision_type="RECOMMENDATION_APPROVED",
+                reviewer_label=reviewer_label_input,
+                justification=justification_input,
+                target_entity=selected_failed_node,
+                session_state=st.session_state,
+            )
+            if success:
+                st.success(f"{msg}")
+                time.sleep(1)
+                st.rerun()
             else:
-                official_rev_label = f"{curr_u_name} ({curr_u_role})"
-                if reviewer_label_input and reviewer_label_input != "Prototype Reviewer (Supply Chain Risk Analyst)":
-                    official_rev_label = f"{official_rev_label} - {reviewer_label_input}"
-
-                success, msg, _ = audit_logger.record_decision_event(
-                    run_id=active_run_id,
-                    decision_type="RECOMMENDATION_APPROVED",
-                    reviewer_label=official_rev_label,
-                    justification=justification_input,
-                )
-                if success:
-                    st.success(f"{msg}")
-                    auth_manager._record_audit_event(
-                        event_type="AUTH_DECISION_APPROVED",
-                        actor_username=curr_u_name,
-                        target_username=selected_failed_node,
-                        details={"run_id": active_run_id, "justification_length": len(justification_input or "")},
-                    )
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.error(f"{msg}")
+                st.error(f"{msg}")
 
         if reject_clicked:
-            # Backend Enforcement 1: Re-validate active session & account status
-            if not auth_manager.is_user_active(curr_u_name):
-                st.error("Authentication error: Your account is deactivated. Access revoked.")
-            # Backend Enforcement 2: Role Authorization (Viewer cannot reject)
-            elif not auth_manager.can_approve_or_reject(curr_u_role):
-                st.error(f"Unauthorized: User '{curr_u_name}' with role '{curr_u_role}' is not permitted to reject recovery plans.")
-            elif not active_run_id:
-                st.error("No active simulation run ID found to reject.")
-            elif not justification_input or not justification_input.strip():
-                st.error("Rejection blocked: Specific justification is required to record a rejection recommendation.")
+            success, msg, _ = execute_authorized_decision(
+                auth_manager=auth_manager,
+                audit_logger=audit_logger,
+                actor_username=curr_u_name,
+                run_id=active_run_id,
+                decision_type="RECOMMENDATION_REJECTED",
+                reviewer_label=reviewer_label_input,
+                justification=justification_input,
+                target_entity=selected_failed_node,
+                session_state=st.session_state,
+            )
+            if success:
+                st.warning(f"{msg}")
+                time.sleep(1)
+                st.rerun()
             else:
-                official_rev_label = f"{curr_u_name} ({curr_u_role})"
-                if reviewer_label_input and reviewer_label_input != "Prototype Reviewer (Supply Chain Risk Analyst)":
-                    official_rev_label = f"{official_rev_label} - {reviewer_label_input}"
-
-                success, msg, _ = audit_logger.record_decision_event(
-                    run_id=active_run_id,
-                    decision_type="RECOMMENDATION_REJECTED",
-                    reviewer_label=official_rev_label,
-                    justification=justification_input,
-                )
-                if success:
-                    st.warning(f"{msg}")
-                    auth_manager._record_audit_event(
-                        event_type="AUTH_DECISION_REJECTED",
-                        actor_username=curr_u_name,
-                        target_username=selected_failed_node,
-                        details={"run_id": active_run_id, "justification_length": len(justification_input or "")},
-                    )
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.error(f"{msg}")
+                st.error(f"{msg}")
 
     # =========================================================================
     # SECTION 7: AUDIT HISTORY
@@ -3462,9 +3928,16 @@ Strategy: <span style="color:#2DD4BF;">{rec_display_str}</span>
     # SECTION 8: USER MANAGEMENT & ROLE-BASED ACCESS CONTROL (ADMIN ONLY)
     # =========================================================================
     elif "8. 👥" in selected_nav:
-        # Strict backend authorization check
-        if curr_u_role != "ADMIN":
-            st.error("Access Denied: Only users with the 'ADMIN' role can access User Management.")
+        # Strict backend authorization check against live database
+        live_um_perms = get_ui_control_permissions(auth_manager, curr_u_name, st.session_state)
+        if not live_um_perms["is_active"] or not auth_manager.can_manage_users(live_um_perms["role"]):
+            auth_manager._record_audit_event(
+                event_type="AUTH_UNAUTHORIZED_ADMIN_ATTEMPT",
+                actor_username=curr_u_name or "ANONYMOUS",
+                target_username="USER_MANAGEMENT",
+                details={"role": live_um_perms["role"], "reason": "Non-admin role attempted user management"},
+            )
+            st.error(f"Access denied: User '{curr_u_name}' with role '{live_um_perms['role']}' is not permitted to access User Management.")
             st.stop()
 
         st.markdown(
@@ -3491,10 +3964,10 @@ Strategy: <span style="color:#2DD4BF;">{rec_display_str}</span>
             st.markdown("#### Provision New Enterprise Personnel Account")
             st.caption("Create a new user account with strict role assignment. Public self-registration is permanently prohibited.")
             with st.form("form_create_new_enterprise_user"):
-                new_uname = st.text_input("Username:", placeholder="e.g. jsmith", help="Alphanumeric, at least 3 characters.")
-                new_uemail = st.text_input("Email Address:", placeholder="e.g. jsmith@enterprise.com")
-                new_urole = st.selectbox("Assign User Role:", ["REVIEWER", "VIEWER"])
-                new_upw = st.text_input("Initial Password:", type="password", help="At least 8 characters with letters and numbers.")
+                new_uname = st.text_input("Username:", placeholder="e.g. jsmith", help="Alphanumeric, at least 3 characters.", key="new_user_username_input")
+                new_uemail = st.text_input("Email Address:", placeholder="e.g. jsmith@enterprise.com", key="new_user_email_input")
+                new_urole = st.selectbox("Assign User Role:", ["REVIEWER", "VIEWER"], key="new_user_role_select")
+                new_upw = st.text_input("Initial Password:", type="password", help="At least 8 characters with letters and numbers.", key="new_user_pw_input")
                 sub_create_u = st.form_submit_button("Provision User Account", key="btn_sub_create_user", use_container_width=True)
                 if sub_create_u:
                     ok_cu, msg_cu, _ = auth_manager.create_user(curr_u_name, new_uname, new_uemail, new_upw, new_urole)
@@ -3639,7 +4112,7 @@ def run_cli_fallback(args: argparse.Namespace) -> None:
     # 3. Member 3: Disruption Simulation
     failed_target = args.fail_node or ("Processor X" if "Processor X" in graph else list(graph.nodes())[0])
     print(f"\n[Step 3/5] Simulating disruption at target: '{failed_target}'...")
-    sim_res = simulate_disruption(graph, failed_node=failed_target)
+    sim_res = simulate_disruption(graph, failed_node=failed_target, actor_role="ADMIN")
     print(f"           Impact Level: {sim_res.get('impact_level')}")
     print(f"           Affected Entities ({len(sim_res.get('affected_entities', []))}): {sim_res.get('affected_entities', [])}")
 
@@ -3693,6 +4166,7 @@ def run_cli_fallback(args: argparse.Namespace) -> None:
         financial_result=fin_res,
         decision_exp=exp,
         execution_channel="CLI",
+        actor_role="ADMIN",
     )
     print(f"\n[Audit] Simulation recorded in nexus_audit_runs with Run ID: {cli_run_id}")
     print("[Tip] To launch the full interactive web dashboard, run:")

@@ -49,7 +49,7 @@ def executed_pipeline(base_supply_chain):
     risk_findings = detect_shared_risks(base_supply_chain, only_shared=False)
 
     # Member 3: Disruption simulation
-    sim_result = simulate_disruption(base_supply_chain, failed_node="Processor X")
+    sim_result = simulate_disruption(base_supply_chain, failed_node="Processor X", actor_role="ADMIN")
 
     # Member 4: Financial optimization
     scenario = build_financial_scenario_from_simulation(
@@ -203,7 +203,7 @@ def test_09_human_approval_trigger_conditions(base_supply_chain):
     agent = DecisionExplanationAgent()
 
     # Case A: High budget utilization scenario (> 85%)
-    sim_res = simulate_disruption(base_supply_chain, failed_node="Processor X")
+    sim_res = simulate_disruption(base_supply_chain, failed_node="Processor X", actor_role="ADMIN")
     scen = DisruptionScenario(
         scenario_id="SCEN-HIGH-UTIL",
         affected_quantity=100.0,

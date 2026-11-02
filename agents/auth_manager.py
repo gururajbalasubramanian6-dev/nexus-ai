@@ -58,7 +58,9 @@ class AuthManager:
     Persists data in SQLite with strict parameterized queries.
     """
 
-    def __init__(self, db_path: str = "data/nexus_auth.db") -> None:
+    def __init__(self, db_path: Optional[str] = None) -> None:
+        if db_path is None:
+            db_path = os.environ.get("NEXUS_AUTH_DB_PATH", "data/nexus_auth.db")
         self.db_path = db_path
         self._is_memory = (db_path == ":memory:")
         self._memory_conn: Optional[sqlite3.Connection] = None

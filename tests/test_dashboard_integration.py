@@ -146,7 +146,7 @@ def test_05_disruption_simulation_works():
     df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
     graph = build_supply_chain_graph(df)
 
-    sim = simulate_disruption(graph, failed_node="Processor X")
+    sim = simulate_disruption(graph, failed_node="Processor X", actor_role="ADMIN")
     assert sim["failed_entity"] == "Processor X"
     assert sim["impact_level"] == "Critical"
     assert set(sim["affected_entities"]) == {"Supplier A", "Supplier B"}
@@ -160,7 +160,7 @@ def test_05_disruption_simulation_works():
 def test_06_financial_engine_receives_expected_input():
     """Verify that build_financial_scenario_from_simulation correctly maps payloads."""
     graph = create_synthetic_supply_chain()
-    sim = simulate_disruption(graph, failed_node="Processor X")
+    sim = simulate_disruption(graph, failed_node="Processor X", actor_role="ADMIN")
 
     scenario = build_financial_scenario_from_simulation(
         simulation_result=sim,
@@ -192,7 +192,7 @@ def test_06_financial_engine_receives_expected_input():
 def test_07_decision_explanation_reflects_actual_outputs():
     """Verify that the decision explanation strictly uses actual calculated values."""
     graph = create_synthetic_supply_chain()
-    sim = simulate_disruption(graph, failed_node="Processor X")
+    sim = simulate_disruption(graph, failed_node="Processor X", actor_role="ADMIN")
     scenario = build_financial_scenario_from_simulation(sim, loss_per_unit=150.0, available_budget=40000.0)
     options = generate_candidate_recovery_options(scenario, graph=graph)
     fin = optimize_recovery_plan(scenario, options)
@@ -222,7 +222,7 @@ def test_08_missing_data_handled_honestly():
     graph = build_supply_chain_graph(df)
 
     # In dependencies.csv, nodes don't have lead_time_days or alternatives registered
-    sim = simulate_disruption(graph, failed_node="Processor X")
+    sim = simulate_disruption(graph, failed_node="Processor X", actor_role="ADMIN")
     scenario = build_financial_scenario_from_simulation(sim)
     options = generate_candidate_recovery_options(scenario, graph=graph)
     fin = optimize_recovery_plan(scenario, options)
@@ -264,8 +264,8 @@ def test_10_changing_scenario_changes_results():
     """Verify that simulating Processor X produces different results from Processor Y."""
     graph = create_synthetic_supply_chain()
 
-    res_px = simulate_disruption(graph, failed_node="Processor X")
-    res_py = simulate_disruption(graph, failed_node="Processor Y")
+    res_px = simulate_disruption(graph, failed_node="Processor X", actor_role="ADMIN")
+    res_py = simulate_disruption(graph, failed_node="Processor Y", actor_role="ADMIN")
 
     assert res_px["failed_entity"] != res_py["failed_entity"]
     assert res_px["affected_entities"] != res_py["affected_entities"]
@@ -285,7 +285,7 @@ def test_10_changing_scenario_changes_results():
 def test_11_resilience_network_figure_generation():
     """Verify that create_resilient_network_figure creates a valid Plotly Figure."""
     graph = create_synthetic_supply_chain()
-    sim = simulate_disruption(graph, failed_node="Processor X")
+    sim = simulate_disruption(graph, failed_node="Processor X", actor_role="ADMIN")
 
     fig = create_resilient_network_figure(
         graph=graph,
@@ -356,7 +356,7 @@ def test_12_sap_hana_integration_in_dashboard():
     assert len(nodes_df) == 7
 
     # Run complete dashboard pipeline on SAP HANA graph
-    sim = simulate_disruption(graph, failed_node="Processor X")
+    sim = simulate_disruption(graph, failed_node="Processor X", actor_role="ADMIN")
     fig = create_resilient_network_figure(graph, simulation_result=sim, selected_entity="Processor X")
     assert isinstance(fig, go.Figure)
 
@@ -382,7 +382,7 @@ def test_13_supplier_failure_scenarios_execute_without_error():
 
     for supplier_node in ["Supplier A", "Supplier B", "Supplier C"]:
         # 1. Member 3: Disruption simulation
-        sim_res = simulate_disruption(graph, failed_node=supplier_node)
+        sim_res = simulate_disruption(graph, failed_node=supplier_node, actor_role="ADMIN")
         assert sim_res["failed_entity"] == supplier_node
         assert sim_res["estimated_capacity_impact"]["estimated_direct_capacity_loss"] is None
 
@@ -441,7 +441,7 @@ def test_14_missing_capacity_and_optional_financial_inputs_handled_safely():
     isolated_graph = nx.DiGraph()
     isolated_graph.add_node("Isolated Supplier", node_type="Supplier")
 
-    sim_res = simulate_disruption(isolated_graph, failed_node="Isolated Supplier")
+    sim_res = simulate_disruption(isolated_graph, failed_node="Isolated Supplier", actor_role="ADMIN")
     assert sim_res["estimated_capacity_impact"]["estimated_direct_capacity_loss"] is None
 
     # Test with None budget and None lead time
@@ -486,7 +486,7 @@ def test_15_supplier_c_failure_and_missing_capacity_display():
     graph.add_edge("Processor Y", "Supplier C", material="Battery cells", capacity=120.0)
 
     # 1. Simulate disruption at Supplier C
-    sim_res = simulate_disruption(graph, failed_node="Supplier C")
+    sim_res = simulate_disruption(graph, failed_node="Supplier C", actor_role="ADMIN")
     cap_impact = sim_res.get("estimated_capacity_impact", {})
     direct_cap = cap_impact.get("estimated_direct_capacity_loss")
 
@@ -562,7 +562,7 @@ def test_16_complete_capacity_data_preserves_full_optimization():
     graph = build_supply_chain_graph(df)
 
     # 1. Member 3: Disruption simulation at Processor X
-    sim_res = simulate_disruption(graph, failed_node="Processor X")
+    sim_res = simulate_disruption(graph, failed_node="Processor X", actor_role="ADMIN")
     cap_impact = sim_res["estimated_capacity_impact"]
     assert cap_impact["estimated_direct_capacity_loss"] == 180.0
     assert "Supplier A" in sim_res["affected_entities"]
@@ -696,7 +696,7 @@ def test_17_supplier_consistency_standard_dataset(supplier, expected_inbound_cap
     assert graph.out_degree(supplier) == 0
     assert graph.in_degree(supplier) >= 1
 
-    sim_res = simulate_disruption(graph, failed_node=supplier)
+    sim_res = simulate_disruption(graph, failed_node=supplier, actor_role="ADMIN")
     assert sim_res["affected_entities"] == []
     assert sim_res["impact_level"] == "Low"
     assert sim_res["estimated_capacity_impact"]["estimated_direct_capacity_loss"] is None
@@ -801,7 +801,7 @@ def test_18_supplier_consistency_sap_hana_path(supplier, expected_inbound_capaci
     assert graph.out_degree(supplier) == 0
     assert graph.in_degree(supplier) >= 1
 
-    sim_res = simulate_disruption(graph, failed_node=supplier)
+    sim_res = simulate_disruption(graph, failed_node=supplier, actor_role="ADMIN")
     assert sim_res["affected_entities"] == []
     assert sim_res["impact_level"] == "Low"
 
@@ -862,7 +862,7 @@ def test_19_section_d_broken_corridors_and_actions_display(scenario_node, expect
     df = load_and_validate_dependencies(DEFAULT_DEPENDENCIES_CSV)
     graph = build_supply_chain_graph(df)
 
-    sim_res = simulate_disruption(graph, failed_node=scenario_node)
+    sim_res = simulate_disruption(graph, failed_node=scenario_node, actor_role="ADMIN")
 
     # Key availability checks
     paths = sim_res.get("disrupted_paths") or sim_res.get("affected_paths") or []
@@ -879,3 +879,66 @@ def test_19_section_d_broken_corridors_and_actions_display(scenario_node, expect
     # Corridor paths filter check as implemented in app.py Section D
     corridor_paths = [p for p in paths if len(p) > 1]
     assert len(corridor_paths) == len(expected_corridors)
+
+
+# =========================================================================
+# Test 20: Section 5 Recovery Plan Residual Loss Disclosure & Strategy Wording
+# =========================================================================
+def test_20_section_5_recovery_plan_residual_loss_disclosure_and_strategy_wording(tmp_path, monkeypatch):
+    """
+    Verifies Section 5 (Recovery Plan & Financial Optimization) accuracy improvements:
+    1. KPI is renamed to 'MODELLED RESIDUAL LOSS' (and does not use 'Residual Risk').
+    2. Retains the calculated $0 modelled residual loss and $9,000 net savings for Processor X.
+    3. Explains that the value represents modelled financial loss after applying the selected
+       recovery option and discloses that actual operational residual risk cannot be confirmed
+       because verified backup inventory and alternative-supplier capacity data are unavailable.
+    4. Replaces 'MATHEMATICALLY OPTIMAL RECOVERY STRATEGY' with
+       'LOWEST-COST FEASIBLE RECOVERY STRATEGY'.
+    """
+    import time
+    from pathlib import Path
+    from streamlit.testing.v1 import AppTest
+    from agents.auth_manager import AuthManager, UserRole
+
+    temp_auth_db = tmp_path / "test_nexus_auth.db"
+    temp_audit_db = tmp_path / "test_nexus_audit.db"
+    monkeypatch.setenv("NEXUS_AUTH_DB_PATH", str(temp_auth_db))
+    monkeypatch.setenv("NEXUS_AUDIT_DB_PATH", str(temp_audit_db))
+
+    root_dir = Path(__file__).resolve().parent.parent
+    app_path = str(root_dir / "app.py")
+    mgr = AuthManager(str(temp_auth_db))
+    ok_adm, _ = mgr.init_first_admin("admin_test", "admin@nexus.test", "AdminPass123!")
+    assert ok_adm
+    ok_view, _, viewer_u = mgr.create_user(
+        "admin_test", "viewer_test", "viewer@nexus.test", "ViewerPass123!", UserRole.VIEWER
+    )
+    assert ok_view and viewer_u is not None
+
+    at = AppTest.from_file(app_path, default_timeout=30)
+    at.session_state["nexus_auth_authenticated"] = True
+    at.session_state["nexus_auth_user"] = viewer_u
+    at.session_state["nexus_auth_last_activity"] = time.time()
+    at.run()
+
+    # Navigate to Section 5: Recovery Plan
+    at.sidebar.radio[0].set_value("5. 💰 Recovery Plan").run()
+
+    all_markdown = "\n".join(m.value for m in at.markdown)
+
+    # 1. Residual Risk Disclosure checks
+    assert "MODELLED RESIDUAL LOSS" in all_markdown
+    assert ">Residual Risk<" not in all_markdown
+    assert "$0" in all_markdown
+    assert "$9,000" in all_markdown
+    assert (
+        "Modelled financial loss after applying the selected recovery option. "
+        "Actual operational residual risk cannot be confirmed because verified backup inventory "
+        "and alternative-supplier capacity data are unavailable."
+    ) in all_markdown
+
+    # 2. Recovery Strategy Wording checks
+    assert "LOWEST-COST FEASIBLE RECOVERY STRATEGY" in all_markdown
+    assert "Mathematically Optimal Recovery Strategy" not in all_markdown
+    assert "MATHEMATICALLY OPTIMAL RECOVERY STRATEGY" not in all_markdown
+

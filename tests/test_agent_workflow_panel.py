@@ -179,7 +179,7 @@ def test_06_actual_sequential_agent_execution(base_graph):
 
     # Step 3: Disruption Simulation Agent
     t0 = time.perf_counter()
-    sim_result = simulate_disruption(base_graph, failed_node="Processor X")
+    sim_result = simulate_disruption(base_graph, failed_node="Processor X", actor_role="ADMIN")
     t1 = time.perf_counter()
     sim_duration = (t1 - t0) * 1000.0
     assert sim_result["failed_entity"] == "Processor X"

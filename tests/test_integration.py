@@ -41,7 +41,7 @@ def test_member1_mapping_agent_graph_ingestion(canonical_graph):
     assert canonical_graph.number_of_edges() >= 5
 
     # Run simulation directly on the graph
-    result = simulate_disruption(canonical_graph, failed_node="Processor X")
+    result = simulate_disruption(canonical_graph, failed_node="Processor X", actor_role="ADMIN")
     assert result["failed_entity"] == "Processor X"
     assert result["impact_level"] == "Critical"
     assert len(result["affected_entities"]) == 4
@@ -55,7 +55,7 @@ def test_processor_failure_integration(canonical_graph):
     Tests simulation of Processor X failure on the agreed multi-tier dataset.
     Verifies affected paths, materials, direct capacity loss, and impact level.
     """
-    result = simulate_disruption(canonical_graph, failed_node="Processor X")
+    result = simulate_disruption(canonical_graph, failed_node="Processor X", actor_role="ADMIN")
 
     # Blast radius checks
     assert "Supplier A" in result["affected_entities"]
@@ -83,7 +83,7 @@ def test_transport_route_failure_integration(canonical_graph):
     Tests simulation of transport corridor failure using route identifier 'Route-PX-SA'
     (Processor X -> Supplier A corridor).
     """
-    result = simulate_disruption(canonical_graph, failed_route="Route-PX-SA")
+    result = simulate_disruption(canonical_graph, failed_route="Route-PX-SA", actor_role="ADMIN")
 
     assert result["disruption_type"] == "Transport route failure"
     assert "Route (Processor X -> Supplier A)" in result["failed_entity"]
@@ -115,7 +115,7 @@ def test_alternative_path_capacity_sufficiency(canonical_graph):
     Remaining capacity (50.0) < Lost capacity (100.0).
     Therefore, the alternative path must NOT be marked sufficient!
     """
-    result = simulate_disruption(canonical_graph, failed_node="Processor X")
+    result = simulate_disruption(canonical_graph, failed_node="Processor X", actor_role="ADMIN")
     details = {d["entity"]: d for d in result["entity_impact_details"]}
 
     f2_detail = details["Factory 2"]
@@ -136,7 +136,7 @@ def test_member4_financial_engine_payload(canonical_graph):
     Validates that get_financial_engine_payload() creates the exact standardized
     structure required by Member 4's Financial Loss & Optimization Engine.
     """
-    simulation_result = simulate_disruption(canonical_graph, failed_node="Processor X")
+    simulation_result = simulate_disruption(canonical_graph, failed_node="Processor X", actor_role="ADMIN")
     financial_payload = get_financial_engine_payload(simulation_result)
 
     expected_financial_keys = [
@@ -182,10 +182,10 @@ def test_member5_streamlit_ui_dataframes(canonical_graph):
     pre-formatted DataFrames for st.dataframe() and summary metrics.
     """
     agent = DisruptionSimulationAgent(canonical_graph)
-    result = agent.simulate(failed_node="Processor X")
+    result = agent.simulate(failed_node="Processor X", actor_role="ADMIN")
 
     # 1. Summary comparison table for all nodes
-    all_nodes_df = agent.simulate_all_nodes()
+    all_nodes_df = agent.simulate_all_nodes(actor_role="ADMIN")
     assert isinstance(all_nodes_df, pd.DataFrame)
     assert len(all_nodes_df) == canonical_graph.number_of_nodes()
     assert "Entity" in all_nodes_df.columns

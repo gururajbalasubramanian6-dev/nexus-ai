@@ -125,6 +125,7 @@ def test_02_record_simulation_run_atomic_transaction(
         financial_result=sample_financial_result,
         decision_exp={"requires_human_approval": True},
         execution_channel="STREAMLIT",
+        actor_role="ADMIN",
     )
 
     assert run_id.startswith("RUN-")
@@ -165,6 +166,7 @@ def test_03_timestamp_strict_iso8601_format(
         scenario_params={},
         sim_result=sample_sim_result,
         financial_result=sample_financial_result,
+        actor_role="ADMIN",
     )
 
     run = memory_logger.get_run_by_id(run_id)
@@ -211,6 +213,7 @@ def test_04_record_unquantified_scenario_gracefully(
         scenario_params={"unit_loss": 150.0},
         sim_result=unquantified_sim,
         financial_result=unquantified_fin,
+        actor_role="ADMIN",
     )
 
     run = memory_logger.get_run_by_id(run_id)
@@ -250,6 +253,7 @@ def test_05_unquantified_scenarios_cannot_be_approved(
         scenario_params={},
         sim_result=unquantified_sim,
         financial_result=unquantified_fin,
+        actor_role="ADMIN",
     )
 
     # Attempt to approve
@@ -258,6 +262,7 @@ def test_05_unquantified_scenarios_cannot_be_approved(
         decision_type="RECOMMENDATION_APPROVED",
         reviewer_label="Test Reviewer",
         justification="Attempting to approve unquantified plan",
+        actor_role="ADMIN",
     )
 
     assert not success
@@ -287,6 +292,7 @@ def test_06_rejection_requires_justification(
         scenario_params={},
         sim_result=sample_sim_result,
         financial_result=sample_financial_result,
+        actor_role="ADMIN",
     )
 
     # Attempt rejection with empty justification
@@ -295,6 +301,7 @@ def test_06_rejection_requires_justification(
         decision_type="RECOMMENDATION_REJECTED",
         reviewer_label="Reviewer",
         justification="",
+        actor_role="ADMIN",
     )
     assert not success
     assert "justification is required" in msg
@@ -305,6 +312,7 @@ def test_06_rejection_requires_justification(
         decision_type="RECOMMENDATION_REJECTED",
         reviewer_label="Reviewer",
         justification="Rejected due to operational maintenance window conflict.",
+        actor_role="ADMIN",
     )
     assert success2
     assert status2 == "REJECTED"
@@ -325,6 +333,7 @@ def test_07_prevent_accidental_duplicate_decisions(
         scenario_params={},
         sim_result=sample_sim_result,
         financial_result=sample_financial_result,
+        actor_role="ADMIN",
     )
 
     # First approval succeeds
@@ -333,6 +342,7 @@ def test_07_prevent_accidental_duplicate_decisions(
         decision_type="RECOMMENDATION_APPROVED",
         reviewer_label="Supply Chain Lead",
         justification="Plan satisfies all constraints.",
+        actor_role="ADMIN",
     )
     assert ok1
     assert status1 == "APPROVED"
@@ -343,6 +353,7 @@ def test_07_prevent_accidental_duplicate_decisions(
         decision_type="RECOMMENDATION_APPROVED",
         reviewer_label="Supply Chain Lead",
         justification="Accidental double click",
+        actor_role="ADMIN",
     )
     assert not ok2
     assert "duplicate prevented" in msg2.lower()
@@ -368,6 +379,7 @@ def test_08_events_are_strictly_append_only(
         scenario_params={},
         sim_result=sample_sim_result,
         financial_result=sample_financial_result,
+        actor_role="ADMIN",
     )
 
     # Initially 1 event
@@ -382,6 +394,7 @@ def test_08_events_are_strictly_append_only(
         decision_type="RECOMMENDATION_APPROVED",
         reviewer_label="Risk Director",
         justification="Approved for demonstration.",
+        actor_role="ADMIN",
     )
 
     # Now should have 2 events
@@ -427,6 +440,7 @@ def test_09_deduplication_fingerprint_vs_intentional_rerun(
             scenario_params=params,
             sim_result=sample_sim_result,
             financial_result=sample_financial_result,
+            actor_role="ADMIN",
         )
         session_state["active_fingerprint"] = fingerprint
         session_state["active_run_id"] = new_run_id
@@ -473,6 +487,7 @@ def test_10_database_isolation_does_not_affect_production_file(
             scenario_params={},
             sim_result=sample_sim_result,
             financial_result=sample_financial_result,
+            actor_role="ADMIN",
         )
 
         assert Path(temp_db_path).exists()
@@ -510,6 +525,7 @@ def test_11_transaction_safety_rollback_on_event_failure(
             scenario_params={},
             sim_result=sample_sim_result,
             financial_result=sample_financial_result,
+            actor_role="ADMIN",
         )
 
     # Verify that nexus_audit_runs is completely empty due to rollback
@@ -536,12 +552,14 @@ def test_12_decision_finality_locks_run_against_conflicting_decisions(
         scenario_params={},
         sim_result=sample_sim_result,
         financial_result=sample_financial_result,
+        actor_role="ADMIN",
     )
     ok_app, _, _ = memory_logger.record_decision_event(
         run_id=run_1,
         decision_type="RECOMMENDATION_APPROVED",
         reviewer_label="Lead",
         justification="Initial approval",
+        actor_role="ADMIN",
     )
     assert ok_app
     assert len(memory_logger.get_audit_events(run_id=run_1)) == 2
@@ -552,6 +570,7 @@ def test_12_decision_finality_locks_run_against_conflicting_decisions(
         decision_type="RECOMMENDATION_REJECTED",
         reviewer_label="Different Reviewer",
         justification="Trying to override approval with rejection",
+        actor_role="ADMIN",
     )
     assert not ok_opp
     assert "Decision finality enforced" in msg_opp
@@ -565,12 +584,14 @@ def test_12_decision_finality_locks_run_against_conflicting_decisions(
         scenario_params={},
         sim_result=sample_sim_result,
         financial_result=sample_financial_result,
+        actor_role="ADMIN",
     )
     ok_rej, _, _ = memory_logger.record_decision_event(
         run_id=run_2,
         decision_type="RECOMMENDATION_REJECTED",
         reviewer_label="Lead",
         justification="Initial rejection due to maintenance",
+        actor_role="ADMIN",
     )
     assert ok_rej
     assert len(memory_logger.get_audit_events(run_id=run_2)) == 2
@@ -581,6 +602,7 @@ def test_12_decision_finality_locks_run_against_conflicting_decisions(
         decision_type="RECOMMENDATION_APPROVED",
         reviewer_label="Different Reviewer",
         justification="Trying to override rejection with approval",
+        actor_role="ADMIN",
     )
     assert not ok_opp2
     assert "Decision finality enforced" in msg_opp2
@@ -604,6 +626,7 @@ def test_13_mandatory_approval_requires_justification(
         sim_result=sample_sim_result,
         financial_result=sample_financial_result,
         decision_exp={"requires_human_approval": True},
+        actor_role="ADMIN",
     )
 
     run = memory_logger.get_run_by_id(run_id)
@@ -616,6 +639,7 @@ def test_13_mandatory_approval_requires_justification(
         decision_type="RECOMMENDATION_APPROVED",
         reviewer_label="Reviewer",
         justification="",
+        actor_role="ADMIN",
     )
     assert not ok_blank
     assert "Approval blocked: Mandatory human approval is required" in msg_blank
@@ -632,6 +656,7 @@ def test_13_mandatory_approval_requires_justification(
         decision_type="RECOMMENDATION_APPROVED",
         reviewer_label="Supply Chain Lead",
         justification="Verified capacity with Tier-2 plant manager; authorized allocation.",
+        actor_role="ADMIN",
     )
     assert ok_doc
     assert status_doc == "APPROVED"
@@ -653,6 +678,7 @@ def test_14_database_triggers_prevent_update_and_delete_on_events(
         scenario_params={},
         sim_result=sample_sim_result,
         financial_result=sample_financial_result,
+        actor_role="ADMIN",
     )
 
     conn = memory_logger._get_connection()
@@ -721,6 +747,7 @@ def test_15_intentional_rerun_clears_justification_and_preserves_reviewer(
                 scenario_params=params,
                 sim_result=sample_sim_result,
                 financial_result=sample_financial_result,
+                actor_role="ADMIN",
             )
             session_state["active_sim_fingerprint"] = fingerprint
             session_state["active_run_id"] = new_run_id
